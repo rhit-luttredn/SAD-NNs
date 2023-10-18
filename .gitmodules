@@ -1,0 +1,6 @@
+[submodule "external/NeurOps"]
+	path = external/NeurOps
+	url = git@github.com:SuReLI/NeurOps.git
+[submodule "external/annotated_deep_learning_paper_implementations"]
+	path = external/annotated_deep_learning_paper_implementations
+	url = git@github.com:labmlai/annotated_deep_learning_paper_implementations.git
