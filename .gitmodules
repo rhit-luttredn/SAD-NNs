@@ -4,3 +4,6 @@
 [submodule "external/NeurOps"]
 	path = external/NeurOps
 	url = git@github.com:rhit-luttredn/NeurOps.git
+[submodule "external/ALFA"]
+	path = external/ALFA
+	url = git@github.com:rhit-fioritjx/ALFA.git
