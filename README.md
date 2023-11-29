@@ -66,7 +66,7 @@ _For more examples, please refer to the [Documentation](https://example.com)_
 <!-- CONTACT -->
 ## Contact
 
-David Gottlieb - ___@gmail.com \
+David Gottlieb - j.david.gottlieb@gmail.com \
 Dylan Luttrell - dylanluttrell9591@gmail.com \
 Helen Wang - ___@gmail.com \
 Julian Fiorito - ___@gmail.com
