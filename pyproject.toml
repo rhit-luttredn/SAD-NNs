@@ -11,6 +11,7 @@ numpy = "^1.19.0"
 neurops = { path = "external/NeurOps/pytorch" }
 labml-nn = { path = "external/annotated_deep_learning_paper_implementations" }
 charset-normalizer = "^3.3.0"
+chardet = "^5.2.0"
 
 [build-system]
 requires = ["poetry-core"]
