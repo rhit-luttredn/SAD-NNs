@@ -12,6 +12,7 @@ neurops = { path = "external/NeurOps/pytorch" }
 labml-nn = { path = "external/annotated_deep_learning_paper_implementations" }
 charset-normalizer = "^3.3.0"
 chardet = "^5.2.0"
+torch = "^2.1.1"
 
 [build-system]
 requires = ["poetry-core"]
