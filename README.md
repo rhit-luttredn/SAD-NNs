@@ -14,8 +14,11 @@ TODO: Write About
 <!-- GETTING STARTED -->
 ## Getting Started
 ### Prerequisites
-
-TODO: Figure out and write Prerequisites
+* python
+* poetry
+  ```
+  pip3 install poetry
+  ```
 
 <!-- Template
 This is an example of how to list things you need to use the software and how to install them.
@@ -26,8 +29,16 @@ This is an example of how to list things you need to use the software and how to
 -->
 
 ### Installation
+1. Clone the repo
+   ```sh
+   git clone git@github.com:rhit-luttredn/SAD-NNs.git --recurse-submodules
+   ```
+2. Install poetry packages
+   ```sh
+   poetry install
+   ```
 
-TODO: Create setup script and write installation instructions
+TODO: Create setup script?
 
 <!-- Template
 _Below is an example of how you can instruct your audience on installing and setting up your app. This template doesn't rely on any external dependencies or services._
