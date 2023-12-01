@@ -6,13 +6,12 @@ authors = ["rhit-luttredn <luttredn@rose-hulman.edu>"]
 readme = "README.md"
 
 [tool.poetry.dependencies]
-python = "^3.8"
-numpy = "^1.19.0"
+python = "^3.9"
 neurops = { path = "external/NeurOps/pytorch" }
 labml-nn = { path = "external/annotated_deep_learning_paper_implementations" }
-chardet = "^5.2.0"
-charset-normalizer = "3.3.0"
-torch = "^2.1.1"
+matplotlib = "^3.8.2"
+jupyter = "^1.0.0"
+ipython = "^8.18.1"
 
 [build-system]
 requires = ["poetry-core"]
