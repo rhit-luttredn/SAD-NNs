@@ -12,6 +12,8 @@ labml-nn = { path = "external/annotated_deep_learning_paper_implementations" }
 matplotlib = "^3.8.2"
 jupyter = "^1.0.0"
 ipython = "^8.18.1"
+torch = "^2.1.1"
+numpy = "^1.26.2"
 
 [build-system]
 requires = ["poetry-core"]
