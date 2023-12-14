@@ -291,7 +291,7 @@ if __name__ == '__main__':
     for var in variances:
         print(f"Testing model on noise variance {var}...")
 
-        noise_transform = transforms.Lambda(lambda x: torch.tensor(random_noise(x, mode='s&p', amount=0.2, clip=False), dtype=torch.float32))
+        noise_transform = transforms.Lambda(lambda x: torch.tensor(random_noise(x, mode='s&p', amount=var, clip=False), dtype=torch.float32)) # choose speckle, change amount ot var
         noise_dataset = Dataset(
             config.dataset.dataset_name,
             config.dataset.image_size,
@@ -303,6 +303,6 @@ if __name__ == '__main__':
 
         noise_stats = test(model, noise_test_loader, criterion, num_classes, log_table=noise_table)
         noise_stats.update({"noise_variance": var})
-        noise_stats = {f"noise/{key}": value for key, value in test_stats.items()}
+        noise_stats = {f"noise/{key}": value for key, value in noise_stats.items()}
         wandb.log(noise_stats)
 
