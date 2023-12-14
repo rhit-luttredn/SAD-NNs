@@ -47,6 +47,6 @@ weight_sum.conversion_factor = -1
 
 
 [hyperparameters]
-learning_rate = 0.1
-epochs = 5
+learning_rate = 0.01
+epochs = 1
 batch_size = 128
