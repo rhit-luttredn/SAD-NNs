@@ -1,17 +1,24 @@
 [tool.poetry]
-name = "sad-nns"
+name = "sad_nns"
 version = "0.1.0"
 description = "Self-Aware Developmental Neural Networks"
 authors = ["rhit-luttredn <luttredn@rose-hulman.edu>"]
 readme = "README.md"
 
 [tool.poetry.dependencies]
-python = "^3.8"
-numpy = "^1.19.0"
+python = "^3.9"
 neurops = { path = "external/NeurOps/pytorch" }
 labml-nn = { path = "external/annotated_deep_learning_paper_implementations" }
-charset-normalizer = "^3.3.0"
-
+matplotlib = "^3.8.2"
+jupyter = "^1.0.0"
+ipython = "^8.18.1"
+torch = "^2.1.1"
+numpy = "^1.26.2"
+wandb = "^0.16.0"
+tomli = "^2.0.1"
+scikit-image = "^0.22.0"
+torchrl = "^0.2.1"
+scikit-learn = "^1.3.2"
 
 [build-system]
 requires = ["poetry-core"]
