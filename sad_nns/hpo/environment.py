@@ -30,9 +30,9 @@ from torchrl.envs.utils import check_env_specs, step_mdp
 
 
 class HPOEnv(torchrl.envs.EnvBase):
-    def __init__(self, make_model: callable, train_cb: callable, device=None, batch_size=None, seed=None):
-        self.make_model = make_model
-        self.train_model = train_cb
+    def __init__(self, device=None, batch_size=None, seed=None):
+        # self.make_model = make_model
+        # self.train_model = train_cb
     
         self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.batch_size = batch_size or []
