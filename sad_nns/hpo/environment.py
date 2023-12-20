@@ -30,7 +30,13 @@ from torchrl.envs.utils import check_env_specs, step_mdp
 
 
 class HPOEnv(torchrl.envs.EnvBase):
-    def __init__(self, device="cpu", batch_size=[], seed=None):
+    def __init__(self, make_model: callable, train_cb: callable, device=None, batch_size=None, seed=None):
+        self.make_model = make_model
+        self.train_model = train_cb
+    
+        self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.batch_size = batch_size or []
+
         self._max_epoch = 255
         self._X_features_range = (10, 200)
         self._Y_features_range = (1, 20)
@@ -63,6 +69,7 @@ class HPOEnv(torchrl.envs.EnvBase):
             prev_valid_loss=UnboundedContinuousTensorSpec(
                 device=self.device, dtype=torch.float32, shape=()
             ),
+
             # Budget Features
             max_epoch=BoundedTensorSpec(
                 low=0, high=self._max_epoch, dtype=torch.int64, shape=()
@@ -70,6 +77,7 @@ class HPOEnv(torchrl.envs.EnvBase):
             epoch=BoundedTensorSpec(
                 low=0, high=self._max_epoch, dtype=torch.int64, shape=()
             ),
+
             # Dataset Meta-Features
             X_features=BoundedTensorSpec(
                 low=self._X_features_range[0],
@@ -107,6 +115,7 @@ class HPOEnv(torchrl.envs.EnvBase):
         #     batch_size = BoundedTensorSpec(low=0,high=1,dtype=torch.float32, shape = ()),
         #     shape = (),
         # )
+
         self.action_spec = BoundedTensorSpec(
             low=torch.Tensor([0, -0.001, 0]),
             high=torch.Tensor([1, 0.001, 1]),
@@ -132,17 +141,17 @@ class HPOEnv(torchrl.envs.EnvBase):
         torch.set_grad_enabled(True)
         self.model.train()
 
-        # Call a provided `train()` hook
-        # for frac in np.arange(0, 1, batch_size):
-        #     i0 = int(frac * len(self.X_train))
-        #     i1 = int(min((frac + batch_size) * len(self.X_train), len(self.X_train)))
-        #     X_batch = self.X_train[i0:i1]
-        #     Y_batch = self.Y_train[i0:i1]
-        #     Y_pred = self.model(X_batch)
-        #     loss = self.loss_fn(Y_pred, Y_batch)
-        #     self.optimizer.zero_grad()
-        #     loss.backward()
-        #     self.optimizer.step()
+        # TODO: Call a provided `train()` hook
+        for frac in np.arange(0, 1, batch_size):
+            i0 = int(frac * len(self.X_train))
+            i1 = int(min((frac + batch_size) * len(self.X_train), len(self.X_train)))
+            X_batch = self.X_train[i0:i1]
+            Y_batch = self.Y_train[i0:i1]
+            Y_pred = self.model(X_batch)
+            loss = self.loss_fn(Y_pred, Y_batch)
+            self.optimizer.zero_grad()
+            loss.backward()
+            self.optimizer.step()
 
         torch.set_grad_enabled(was_enabled)
         self.model.eval()
@@ -150,15 +159,18 @@ class HPOEnv(torchrl.envs.EnvBase):
         train_loss = self.loss_fn(Y_pred, self.Y_train).detach()
         Y_pred = self.model(self.X_valid)
         valid_loss = self.loss_fn(Y_pred, self.Y_valid).detach()
+
         raw_reward = self.reward_fn(valid_loss).view(*tensordict.shape, 1)
         reward = raw_reward - self.prev_reward
         self.prev_reward = raw_reward
         done = torch.zeros_like(reward, dtype=torch.bool)
+
         if stop or self.epoch >= self.max_epoch:
             Y_pred = self.model(self.X_test)
             test_loss = self.loss_fn(Y_pred, self.Y_test).detach()
             reward += self.reward_fn(test_loss).view(*tensordict.shape, 1)
             done = torch.ones_like(reward, dtype=torch.bool)
+
         troublemakers = [train_loss.numpy(), valid_loss.numpy()]
         if np.isnan(troublemakers).any() or np.isinf(troublemakers).any():
             done = torch.ones_like(reward, dtype=torch.bool)
@@ -181,6 +193,7 @@ class HPOEnv(torchrl.envs.EnvBase):
                 batch_size=tensordict.shape,
             )
             return out
+
         out = TensorDict(
             {
                 "train_loss": train_loss.mean(),
@@ -199,6 +212,7 @@ class HPOEnv(torchrl.envs.EnvBase):
             },
             batch_size=tensordict.shape,
         )
+
         self.prev_train_loss = train_loss
         self.prev_valid_loss = valid_loss
         return out
@@ -208,6 +222,8 @@ class HPOEnv(torchrl.envs.EnvBase):
             tensordict = TensorDict({}, [])
             if self.batch_size:
                 tensordict = tensordict.expand(self.batch_size).contiguous()
+
+        # TODO: Call a provided `get_dataset()` hook
         self.dataset = random_regression()
         X_train, Y_train, X_valid, Y_valid, X_test, Y_test = self.dataset
         self.dataset_shape = (
@@ -217,6 +233,7 @@ class HPOEnv(torchrl.envs.EnvBase):
             Y_valid.shape[0],
             Y_test.shape[0],
         )
+
         self.X_train = torch.Tensor(X_train)
         self.Y_train = torch.Tensor(Y_train)
         self.std = float(Y_train.std())
@@ -224,6 +241,8 @@ class HPOEnv(torchrl.envs.EnvBase):
         self.Y_valid = torch.Tensor(Y_valid)
         self.X_test = torch.Tensor(X_test)
         self.Y_test = torch.Tensor(Y_test)
+
+        # TODO: Use this: self.model, self.output_spec = self.make_model(self.dataset_shape)
         self.model = nn.Sequential(
             nn.Linear(self.X_train.shape[1], 64),
             nn.ReLU(),
@@ -234,6 +253,7 @@ class HPOEnv(torchrl.envs.EnvBase):
             nn.Linear(64, self.Y_train.shape[1]),
         )
         self.optimizer = torch.optim.SGD(self.model.parameters(), lr=0.001)
+
         self.model.eval()
         train_loss = self.loss_fn(self.model(self.X_train), self.Y_train).detach()
         self.prev_train_loss = train_loss
