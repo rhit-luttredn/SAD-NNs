@@ -29,7 +29,7 @@ from torchrl.envs.transforms.transforms import _apply_to_composite
 from torchrl.envs.utils import check_env_specs, step_mdp
 
 
-class CustomEnv(torchrl.envs.EnvBase):
+class HPOEnv(torchrl.envs.EnvBase):
     def __init__(self, device="cpu", batch_size=[], seed=None):
         self._max_epoch = 255
         self._X_features_range = (10, 200)
@@ -131,16 +131,19 @@ class CustomEnv(torchrl.envs.EnvBase):
         self.set_learning_rate(lr)
         torch.set_grad_enabled(True)
         self.model.train()
-        for frac in np.arange(0, 1, batch_size):
-            i0 = int(frac * len(self.X_train))
-            i1 = int(min((frac + batch_size) * len(self.X_train), len(self.X_train)))
-            X_batch = self.X_train[i0:i1]
-            Y_batch = self.Y_train[i0:i1]
-            Y_pred = self.model(X_batch)
-            loss = self.loss_fn(Y_pred, Y_batch)
-            self.optimizer.zero_grad()
-            loss.backward()
-            self.optimizer.step()
+
+        # Call a provided `train()` hook
+        # for frac in np.arange(0, 1, batch_size):
+        #     i0 = int(frac * len(self.X_train))
+        #     i1 = int(min((frac + batch_size) * len(self.X_train), len(self.X_train)))
+        #     X_batch = self.X_train[i0:i1]
+        #     Y_batch = self.Y_train[i0:i1]
+        #     Y_pred = self.model(X_batch)
+        #     loss = self.loss_fn(Y_pred, Y_batch)
+        #     self.optimizer.zero_grad()
+        #     loss.backward()
+        #     self.optimizer.step()
+
         torch.set_grad_enabled(was_enabled)
         self.model.eval()
         Y_pred = self.model(self.X_train)
