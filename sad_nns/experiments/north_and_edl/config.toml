@@ -1,7 +1,8 @@
 [data]
 # One of 'mnist', 'cifar10', 'cifar100'
 dataset = 'mnist'
-image_size = 14
+# Default image size is determined by dataset (MNIST: 28, CIFAR: 32, ...)
+image_size = 28
 train_val_split = 0.9
 
 [edl]
@@ -48,5 +49,5 @@ weight_sum.conversion_factor = -1
 
 [hyperparameters]
 learning_rate = 0.01
-epochs = 1
+epochs = 3
 batch_size = 128

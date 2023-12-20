@@ -37,7 +37,8 @@ class Config():
 
         # Dataset
         data = self.config['data']
-        self.dataset = Dataset(data['dataset'], data['image_size'], self.batch_size, 
+        self.dataset = Dataset(data['dataset'], self.batch_size,
+                               image_size=data.get('image_size', None),
                                split=data['train_val_split'])
 
         self.parse_edl()

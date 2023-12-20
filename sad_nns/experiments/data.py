@@ -1,5 +1,3 @@
-from typing import Union, List
-
 import torch
 from torchvision import datasets, transforms
 
@@ -9,19 +7,26 @@ DATA_DIRECTORY = '../../../data/'
 datasets_dict = {
     'mnist': {'dataset': datasets.MNIST,
               'num_classes': 10,
-              'num_channels': 1},
+              'num_channels': 1,
+              'default_image_size': 28},
     'cifar10': {'dataset': datasets.CIFAR10,
                 'num_classes': 10,
-                'num_channels': 3},
+                'num_channels': 3,
+              'default_image_size': 32},
     'cifar100': {'dataset': datasets.CIFAR100,
                  'num_classes': 100,
-                 'num_channels': 3},
+                 'num_channels': 3,
+              'default_image_size': 32},
 }
 
 
-def _get_dataset(dataset, image_size, batch_size, split=0.9, extra_transforms=None):
+def _get_dataset(dataset, batch_size, image_size=None, split=0.9, extra_transforms=None):
     if extra_transforms is None:
         extra_transforms = []
+
+    default_image_size = datasets_dict[dataset]['default_image_size']
+    if image_size is None:
+        image_size = default_image_size
 
     if dataset == 'mnist':
         transform = transforms.Compose([ 
@@ -32,18 +37,22 @@ def _get_dataset(dataset, image_size, batch_size, split=0.9, extra_transforms=No
         ])
     elif dataset == 'cifar10':
         transform = transforms.Compose([
-            transforms.ToTensor(),
-            transforms.Normalize((0.4914, 0.4822, 0.4465),
-                (0.2470, 0.2435, 0.2616)),
+            transforms.RandomCrop(default_image_size, padding=4),
+            transforms.RandomHorizontalFlip(),
             transforms.Resize((image_size, image_size), antialias=True),
+            transforms.ToTensor(),
+            transforms.Normalize((0.5, 0.5, 0.5),
+                (0.5, 0.5, 0.5)),
             *extra_transforms
         ])
     elif dataset == 'cifar100':
         transform = transforms.Compose([
+            transforms.RandomCrop(default_image_size, padding=4),
+            transforms.RandomHorizontalFlip(),
+            transforms.Resize((image_size, image_size), antialias=True),
             transforms.ToTensor(),
             transforms.Normalize((0.5071, 0.4867, 0.4408),
                 (0.2675, 0.2565, 0.2761)),
-            transforms.Resize((image_size, image_size), antialias=True),
             *extra_transforms
         ])
     else:
@@ -59,7 +68,7 @@ def _get_dataset(dataset, image_size, batch_size, split=0.9, extra_transforms=No
 
 
 class Dataset():
-    def __init__(self, dataset_name, image_size, batch_size, split=0.9, extra_transforms=None):
+    def __init__(self, dataset_name, batch_size, image_size=None, split=0.9, extra_transforms=None):
         self.dataset_name = dataset_name
         self.num_classes = datasets_dict[self.dataset_name]['num_classes']
         self.num_channels = datasets_dict[self.dataset_name]['num_channels']
@@ -68,12 +77,12 @@ class Dataset():
         if not isinstance(self.extra_transforms, list):
             self.extra_transforms = [self.extra_transforms]
 
-        self.image_size = image_size
+        self.image_size = image_size or datasets_dict[self.dataset_name]['default_image_size']
         self.batch_size = batch_size
         self.split = split
 
         # Get the datasets and loaders
-        self.datasets = _get_dataset(self.dataset_name, self.image_size, self.batch_size, 
+        self.datasets = _get_dataset(self.dataset_name, self.batch_size, image_size=self.image_size,
                                          split=self.split, extra_transforms=self.extra_transforms)
         loaders = [torch.utils.data.DataLoader(x, batch_size=batch_size, shuffle=True) for x in self.datasets]
         self.train_loader, self.val_loader, self.test_loader = loaders

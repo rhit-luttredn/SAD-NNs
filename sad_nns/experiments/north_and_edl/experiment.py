@@ -5,6 +5,7 @@ from neurops import *
 import numpy as np
 import torch
 from torch.functional import F
+from torchvision import transforms
 from sad_nns.experiments.north_and_edl import config
 from sad_nns.experiments.data import Dataset
 from sad_nns.uncertainty import KLDivergenceLoss
@@ -119,9 +120,15 @@ def test(model, test_loader, criterion, num_classes, log_table=None):
             if log_table is not None and batch_idx < NUM_BATCHES_TO_LOG:
                 log_data = data.cpu().numpy()
                 log_pred = pred.cpu().numpy()
+                log_pred = log_pred.flatten()
                 log_target = target.cpu().numpy()
                 log_u = u.cpu().numpy()
+                log_u = log_u.flatten()
                 log_evidence = evidence.cpu().numpy()
+
+                if config.dataset.num_channels == 3:
+                    log_data = np.transpose(log_data, (0, 2, 3, 1))
+
                 for i in range(NUM_IMAGES_PER_BATCH):
                     id = i + batch_idx * NUM_IMAGES_PER_BATCH
                     log_table.add_data(
@@ -212,20 +219,24 @@ if __name__ == '__main__':
     train_loader = config.dataset.train_loader
     val_loader = config.dataset.val_loader
     test_loader = config.dataset.test_loader
+    image_size = config.dataset.image_size
     num_classes = config.dataset.num_classes
+    num_channels = config.dataset.num_channels
     epochs = config.epochs
     criterion = config.criterion
 
     # Initialize model
+    output_size_after_third_conv = config.dataset.image_size - 12
+    flattened_size = 16*num_channels*output_size_after_third_conv*output_size_after_third_conv
     model = ModSequential(
-        ModConv2d(in_channels=1, out_channels=8, kernel_size=7, masked=True, padding=1, learnable_mask=True),
-        ModConv2d(in_channels=8, out_channels=16, kernel_size=7, masked=True, padding=1, prebatchnorm=True, learnable_mask=True),
-        ModConv2d(in_channels=16, out_channels=16, kernel_size=5, masked=True, prebatchnorm=True, learnable_mask=True),
-        ModLinear(64, 32, masked=True, prebatchnorm=True, learnable_mask=True),
-        ModLinear(32, num_classes, masked=True, prebatchnorm=True, nonlinearity=""),
+        ModConv2d(in_channels=num_channels, out_channels=8*num_channels, kernel_size=7, masked=True, padding=1, learnable_mask=True),
+        ModConv2d(in_channels=8*num_channels, out_channels=16*num_channels, kernel_size=7, masked=True, padding=1, prebatchnorm=True, learnable_mask=True),
+        ModConv2d(in_channels=16*num_channels, out_channels=16*num_channels, kernel_size=5, masked=True, prebatchnorm=True, learnable_mask=True),
+        ModLinear(flattened_size, 32*num_channels, masked=True, prebatchnorm=True, learnable_mask=True),
+        ModLinear(32*num_channels, num_classes, masked=True, prebatchnorm=True, nonlinearity=""),
         track_activations=True,
         track_auxiliary_gradients=True,
-        input_shape = (1, config.dataset.image_size, config.dataset.image_size)
+        input_shape = (num_channels, image_size, image_size)
     ).to(device)
     torch.compile(model)
     optimizer = torch.optim.SGD(model.parameters(), lr=config.learning_rate)
@@ -285,17 +296,17 @@ if __name__ == '__main__':
       columns.append("score_" + str(class_name))
     noise_table = wandb.Table(columns=columns)
 
-    variances = [0.005, 0.01, 0.05, 0.1]
-
+    variances = [0.05, 0.1, 0.25, 0.5]
+    
     print("Testing model on noisy data...")
     for var in variances:
         print(f"Testing model on noise variance {var}...")
 
-        noise_transform = transforms.Lambda(lambda x: torch.tensor(random_noise(x, mode='s&p', amount=var, clip=False), dtype=torch.float32)) # choose speckle, change amount ot var
+        noise_transform = transforms.Lambda(lambda x: torch.tensor(random_noise(x, mode='speckle', var=var, clip=False), dtype=torch.float32)) # choose speckle, change amount ot var
         noise_dataset = Dataset(
             config.dataset.dataset_name,
-            config.dataset.image_size,
             config.dataset.batch_size,
+            image_size=config.dataset.image_size,
             split=0.9,
             extra_transforms=[noise_transform]
         )
@@ -305,4 +316,27 @@ if __name__ == '__main__':
         noise_stats.update({"noise_variance": var})
         noise_stats = {f"noise/{key}": value for key, value in noise_stats.items()}
         wandb.log(noise_stats)
+
+    if config.dataset.dataset_name == 'mnist':
+        columns = copy(BASIC_TABLE_COLUMNS)
+        for class_name in config.dataset.classes:
+            columns.append("score_" + str(class_name))
+        rotation_table = wandb.Table(columns=columns)
+
+        print("Testing model on rotated data...")
+        rotation_transform = transforms.RandomRotation(degrees=(-180, 180))
+        rotation_dataset = Dataset(
+            config.dataset.dataset_name,
+            config.dataset.batch_size,
+            image_size=config.dataset.image_size,
+            split=0.9,
+            extra_transforms=[rotation_transform]
+        )
+        rotation_test_loader = rotation_dataset.test_loader
+
+        rotation_stats = test(model, rotation_test_loader, criterion, num_classes, log_table=rotation_table)
+        rotation_stats = {f"rotation/{key}": value for key, value in noise_stats.items()}
+        wandb.log(rotation_stats)
+
+        
 
