@@ -4,6 +4,9 @@
 [submodule "external/NeurOps"]
 	path = external/NeurOps
 	url = git@github.com:rhit-luttredn/NeurOps.git
+[submodule "external/ALFA"]
+	path = external/ALFA
+	url = git@github.com:rhit-fioritjx/ALFA.git
 [submodule "external/backpropamine"]
 	path = external/backpropamine
 	url = git@github.com:rhit-wangy51/backpropamine.git
