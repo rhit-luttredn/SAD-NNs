@@ -8,8 +8,10 @@ from minigrid.manual_control import ManualControl
 from minigrid.minigrid_env import MiniGridEnv
 from minigrid.wrappers import ImgObsWrapper
 
-from stable_baselines3 import PPO
+from stable_baselines3 import PPO, DQN
 from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
+from stable_baselines3.common.evaluation import evaluate_policy
+from stable_baselines3.dqn.policies import CnnPolicy
 
 import gymnasium as gym
 from gymnasium.envs.registration import register
@@ -24,7 +26,7 @@ class SimpleEnv(MiniGridEnv):
         size=10,
         agent_start_pos=(1, 1),
         agent_start_dir=0,
-        max_steps: int | None = None,
+        max_steps=None,
         **kwargs,
     ):
         self.agent_start_pos = agent_start_pos
@@ -55,12 +57,12 @@ class SimpleEnv(MiniGridEnv):
         # Generate the surrounding walls
         self.grid.wall_rect(0, 0, width, height)
 
-        # Generate verical separation wall
-        for i in range(0, height - 2):
-            self.grid.set(5, i, Wall())
+        # # Generate verical separation wall
+        # for i in range(0, height - 2):
+        #     self.grid.set(2, i, Wall())
 
         # Place a goal square in the bottom-right corner
-        self.put_obj(Goal(), width - 2, height - 2)
+        self.put_obj(Goal(), width - 2, height - 4)
 
         # Place the agent
         if self.agent_start_pos is not None:
@@ -96,23 +98,26 @@ class MinigridFeaturesExtractor(BaseFeaturesExtractor):
 
 def test_model(model, env, num_episodes=100):
     for episode in range(num_episodes):
-        obs = env.reset()
+        obs = env.reset()[0]
         done = False
+        truncated = False
         total_reward = 0
 
-        while not done:
-            action, _states = model.predict(obs, deterministic=True)
-            obs, reward, done, info = env.step(action)
+        while (not truncated and not done):
+
+            obs_image = obs['image']
+            action, _states = model.predict(obs_image, deterministic=True)
+            obs, reward, done, truncated, info = env.step(action)
             total_reward += reward
 
-            env.render()  # Optional: Render the environment to visualize
+            # env.render()  # Optional: Render the environment to visualize
 
         print(f"Episode {episode + 1}: Total Reward = {total_reward}")
 
 def main():
     
-    # manual control of environment
-    # env = SimpleEnv(render_mode="human")
+    # # manual control of environment
+    # env = SimpleEnv(size=5, render_mode="human")
     # manual_control = ManualControl(env, seed=42)
     # manual_control.start()
 
@@ -121,13 +126,26 @@ def main():
     features_extractor_kwargs=dict(features_dim=128),
     )
 
-    env = SimpleEnv() # gym.make("MiniGrid-Empty-16x16-v0", render_mode="rgb_array")
+    env = SimpleEnv(size=5, max_steps=25) # gym.make("MiniGrid-Empty-16x16-v0", render_mode="rgb_array")
     env = ImgObsWrapper(env)
+    
 
-    model = PPO("CnnPolicy", env, policy_kwargs=policy_kwargs, verbose=1)
-    model.learn(2e3)
+    # model = DQN.load('DQN-1', env=env)
+    model = DQN(CnnPolicy, env, policy_kwargs=policy_kwargs, verbose=1)
+    model.learn(total_timesteps=10000)
 
-    test_env = gym.make("Test-v0", render_mode="rgb_array") 
+    mean_reward, std_reward = evaluate_policy(model, model.get_env(), n_eval_episodes=10)
+    print(f"Mean reward: {mean_reward} +/- {std_reward}")
+
+    # model.save('DQN-1')
+
+    register(
+        id='SimpleEnv-v0',
+        entry_point='minigrid-test:SimpleEnv',
+        kwargs={'size': 5, 'agent_start_pos': (1, 1), 'agent_start_dir': 0, 'max_steps': 25}
+    )
+
+    test_env = gym.make("SimpleEnv-v0", render_mode="rgb_array") 
     test_model(model, test_env)
 
 
