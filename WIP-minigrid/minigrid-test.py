@@ -1,138 +1,22 @@
 from __future__ import annotations
 
-import numpy as np
-
-from minigrid.core.constants import COLOR_NAMES
-from minigrid.core.grid import Grid
-from minigrid.core.mission import MissionSpace
-from minigrid.core.world_object import Door, Goal, Key, Wall
-from minigrid.manual_control import ManualControl
-from minigrid.minigrid_env import MiniGridEnv
-from minigrid.wrappers import ImgObsWrapper
-
-from stable_baselines3 import PPO, DQN
-from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
-from stable_baselines3.common.evaluation import evaluate_policy
-from stable_baselines3.dqn.policies import CnnPolicy
-from stable_baselines3.common.callbacks import BaseCallback
-from stable_baselines3.common.utils import set_random_seed
-
-from NORTH.neurops.models import ModSequential, ModLinear, ModConv2d
-
 import itertools
 
 import gymnasium as gym
-from gymnasium.envs.registration import register
-
+import numpy as np
+import sad_nns.envs
 import torch
+from minigrid.core.constants import COLOR_NAMES
+from minigrid.wrappers import ImgObsWrapper
+from neurops.models import ModConv2d, ModLinear, ModSequential
+from stable_baselines3 import DQN, PPO
+from stable_baselines3.common.callbacks import BaseCallback
+from stable_baselines3.common.evaluation import evaluate_policy
+from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
+from stable_baselines3.common.utils import set_random_seed
+from stable_baselines3.dqn.policies import CnnPolicy
 from torch import nn
 
-
-class SimpleEnv(MiniGridEnv):
-    def __init__(
-        self,
-        size=5,
-        agent_start_pos=(1, 1),
-        agent_start_dir=0,
-        max_steps=None,
-        **kwargs,
-    ):
-        self.agent_start_pos = agent_start_pos
-        self.agent_start_dir = agent_start_dir
-
-        mission_space = MissionSpace(mission_func=self._gen_mission)
-
-        if max_steps is None:
-            max_steps = 4 * size**2
-
-        super().__init__(
-            mission_space=mission_space,
-            grid_size=size,
-            # Set this to True for maximum speed
-            see_through_walls=True,
-            max_steps=max_steps,
-            **kwargs,
-        )
-
-    @staticmethod
-    def _gen_mission():
-        return "grand mission"
-
-    def _gen_grid(self, width, height):
-        # Create an empty grid
-        self.grid = Grid(width, height)
-
-        # Generate the surrounding walls
-        self.grid.wall_rect(0, 0, width, height)
-
-        # # Generate verical separation wall
-        # for i in range(0, height - 2):
-        #     self.grid.set(2, i, Wall())
-
-        # Place a goal square in the bottom-right corner
-        self.put_obj(Goal(), width - 2, height - 4)
-
-        # Place the agent
-        if self.agent_start_pos is not None:
-            self.agent_pos = self.agent_start_pos
-            self.agent_dir = self.agent_start_dir
-        else:
-            self.place_agent()
-
-        self.mission = "grand mission"
-
-class ToughEnv(MiniGridEnv):
-    def __init__(
-        self,
-        size=10,
-        agent_start_pos=(1, 1),
-        agent_start_dir=0,
-        max_steps=None,
-        **kwargs,
-    ):
-        self.agent_start_pos = agent_start_pos
-        self.agent_start_dir = agent_start_dir
-
-        mission_space = MissionSpace(mission_func=self._gen_mission)
-
-        if max_steps is None:
-            max_steps = 4 * size**2
-
-        super().__init__(
-            mission_space=mission_space,
-            grid_size=size,
-            # Set this to True for maximum speed
-            see_through_walls=True,
-            max_steps=max_steps,
-            **kwargs,
-        )
-
-    @staticmethod
-    def _gen_mission():
-        return "grand mission"
-
-    def _gen_grid(self, width, height):
-        # Create an empty grid
-        self.grid = Grid(width, height)
-
-        # Generate the surrounding walls
-        self.grid.wall_rect(0, 0, width, height)
-
-        # Generate verical separation wall
-        for i in range(0, height - 2):
-            self.grid.set(2, i, Wall())
-
-        # Place a goal square in the bottom-right corner
-        self.put_obj(Goal(), width - 2, height - 4)
-
-        # Place the agent
-        if self.agent_start_pos is not None:
-            self.agent_pos = self.agent_start_pos
-            self.agent_dir = self.agent_start_dir
-        else:
-            self.place_agent()
-
-        self.mission = "grand mission"
 
 class MinigridFeaturesExtractor(BaseFeaturesExtractor):
     def __init__(self, observation_space: gym.Space, features_dim: int = 512, normalized_image: bool = False) -> None:
@@ -163,22 +47,6 @@ class MinigridFeaturesExtractor(BaseFeaturesExtractor):
 
     def forward(self, observations: torch.Tensor) -> torch.Tensor:
         return self.linear(self.cnn(observations))
-    
-class CustomCallback(BaseCallback):
-    def __init__(self, verbose=0):
-        super(CustomCallback, self).__init__(verbose)
-
-    def _on_step(self) -> bool:
-        # Retrieve the current observation
-        current_observation = self.locals['new_obs']
-        actions = self.locals['actions']
-
-        # Print the observation
-        # print(f"Current Observation: {current_observation}")
-        # print(f"Next Action: {actions}")
-
-        # Return True to continue training
-        return True
     
 class PrintAverageRewardCallback(BaseCallback):
     def __init__(self, print_freq):
@@ -316,14 +184,8 @@ def main():
     # manual_control.start()
 
     policy_kwargs = dict(
-    features_extractor_class=MinigridFeaturesExtractor,
-    features_extractor_kwargs=dict(features_dim=128),
-    )
-
-    register(
-        id='SimpleEnv-v0',
-        entry_point='minigrid-test:SimpleEnv',
-        kwargs={'size': 10, 'agent_start_pos': (1, 1), 'agent_start_dir': 0, 'max_steps': 25}
+        features_extractor_class=MinigridFeaturesExtractor,
+        features_extractor_kwargs=dict(features_dim=128),
     )
 
     env = gym.make("MiniGrid-Empty-5x5-v0", render_mode="rgb_array") 
