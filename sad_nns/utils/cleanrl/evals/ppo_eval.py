@@ -1,8 +1,6 @@
-import random
 from typing import Callable
 
 import gymnasium as gym
-import numpy as np
 import torch
 
 
@@ -14,23 +12,19 @@ def evaluate(
     run_name: str,
     Model: torch.nn.Module,
     device: torch.device = torch.device("cpu"),
-    epsilon: float = 0.05,
     capture_video: bool = True,
+    gamma: float = 0.99,
 ):
-    envs = gym.vector.SyncVectorEnv([make_env(env_id, 0, 0, capture_video, run_name)])
-    model = Model(envs).to(device)
-    model.load_state_dict(torch.load(model_path, map_location=device))
-    model.eval()
+    envs = gym.vector.SyncVectorEnv([make_env(env_id, 0, capture_video, run_name, gamma)])
+    agent = Model(envs).to(device)
+    agent.load_state_dict(torch.load(model_path, map_location=device))
+    agent.eval()
 
     obs, _ = envs.reset()
     episodic_returns = []
     while len(episodic_returns) < eval_episodes:
-        if random.random() < epsilon:
-            actions = np.array([envs.single_action_space.sample() for _ in range(envs.num_envs)])
-        else:
-            q_values = model(torch.Tensor(obs).to(device))
-            actions = torch.argmax(q_values, dim=1).cpu().numpy()
-        next_obs, _, _, _, infos = envs.step(actions)
+        actions, _, _, _ = agent.get_action_and_value(torch.Tensor(obs).to(device))
+        next_obs, _, _, _, infos = envs.step(actions.cpu().numpy())
         if "final_info" in infos:
             for info in infos["final_info"]:
                 if "episode" not in info:

@@ -6,28 +6,16 @@ from dataclasses import dataclass
 
 import gymnasium as gym
 import numpy as np
+import sad_nns.envs
 import torch
 import torch.nn as nn
 import torch.optim as optim
 import tyro
-from gymnasium.envs.registration import register
 from gymnasium.vector import VectorEnv
-from minigrid.core.grid import Grid
-from minigrid.core.mission import MissionSpace
-from minigrid.core.world_object import Door, Goal, Key, Wall
-from minigrid.minigrid_env import MiniGridEnv
 from minigrid.wrappers import ImgObsWrapper
 from stable_baselines3.common.buffers import ReplayBuffer
 from torch.nn import functional as F
 from torch.utils.tensorboard import SummaryWriter
-
-from stable_baselines3.common.atari_wrappers import (
-    ClipRewardEnv,
-    EpisodicLifeEnv,
-    FireResetEnv,
-    MaxAndSkipEnv,
-    NoopResetEnv,
-)
 
 
 @dataclass
@@ -50,13 +38,12 @@ class Args:
     """whether to capture videos of the agent performances (check out `videos` folder)"""
     save_model: bool = False
     """whether to save model into the `runs/{run_name}` folder"""
-    hf_entity: str = ""
-    """the user or org name of the model repository from the Hugging Face Hub"""
+
+    # Environment specific arguments
+    env_size: int = 10
 
     # Algorithm specific arguments
     env_id: str = "SimpleEnv-v0"
-    # env_id: str = "MiniGrid-LavaCrossingS9N1-v0"
-    # env_id: str = "BreakoutNoFrameskip-v4"
     """the id of the environment"""
     total_timesteps: int = 150_000
     """total timesteps of the experiments"""
@@ -85,145 +72,16 @@ class Args:
     train_frequency: int = 4
     """the frequency of training"""
 
-class SimpleEnv(MiniGridEnv):
-    def __init__(
-        self,
-        size=5,
-        agent_start_pos=(1, 1),
-        agent_start_dir=0,
-        max_steps=None,
-        **kwargs,
-    ):
-        self.agent_start_pos = agent_start_pos
-        self.agent_start_dir = agent_start_dir
-
-        mission_space = MissionSpace(mission_func=self._gen_mission)
-
-        if max_steps is None:
-            max_steps = 4 * size**2
-
-        super().__init__(
-            mission_space=mission_space,
-            grid_size=size,
-            # Set this to True for maximum speed
-            see_through_walls=True,
-            max_steps=max_steps,
-            **kwargs,
-        )
-
-    @staticmethod
-    def _gen_mission():
-        return "grand mission"
-
-    def _gen_grid(self, width, height):
-        # Create an empty grid
-        self.grid = Grid(width, height)
-
-        # Generate the surrounding walls
-        self.grid.wall_rect(0, 0, width, height)
-
-        # # Generate verical separation wall
-        # for i in range(0, height - 2):
-        #     self.grid.set(2, i, Wall())
-
-        # Place a goal square in the bottom-right corner
-        self.put_obj(Goal(), width - 2, height - 4)
-
-        # Place the agent
-        if self.agent_start_pos is not None:
-            self.agent_pos = self.agent_start_pos
-            self.agent_dir = self.agent_start_dir
-        else:
-            self.place_agent()
-
-        self.mission = "grand mission"
-
-
-class ToughEnv(MiniGridEnv):
-    def __init__(
-        self,
-        size=10,
-        agent_start_pos=(1, 1),
-        agent_start_dir=0,
-        max_steps=None,
-        **kwargs,
-    ):
-        self.agent_start_pos = agent_start_pos
-        self.agent_start_dir = agent_start_dir
-
-        mission_space = MissionSpace(mission_func=self._gen_mission)
-
-        if max_steps is None:
-            max_steps = 4 * size**2
-
-        super().__init__(
-            mission_space=mission_space,
-            grid_size=size,
-            # Set this to True for maximum speed
-            see_through_walls=True,
-            max_steps=max_steps,
-            **kwargs,
-        )
-
-    @staticmethod
-    def _gen_mission():
-        return "grand mission"
-
-    def _gen_grid(self, width, height):
-        # Create an empty grid
-        self.grid = Grid(width, height)
-
-        # Generate the surrounding walls
-        self.grid.wall_rect(0, 0, width, height)
-
-        # Generate verical separation wall
-        for i in range(0, height - 2):
-            self.grid.set(2, i, Wall())
-
-        # Place a goal square in the bottom-right corner
-        self.put_obj(Goal(), width - 2, height - 4)
-
-        # Place the agent
-        if self.agent_start_pos is not None:
-            self.agent_pos = self.agent_start_pos
-            self.agent_dir = self.agent_start_dir
-        else:
-            self.place_agent()
-
-        self.mission = "grand mission"
-
-register(
-    id='SimpleEnv-v0',
-    entry_point='minigrid-dqn:SimpleEnv',
-    kwargs={'size': 10, 'agent_start_pos': (1, 1), 'agent_start_dir': 1}
-)
-
-register(
-    id='ToughEnv-v0',
-    entry_point='minigrid-dqn:ToughEnv',
-    kwargs={'size': 10, 'agent_start_pos': (1, 1), 'agent_start_dir': 0}
-)
-
 
 def make_env(env_id, seed, idx, capture_video, run_name):
     def thunk():
         if capture_video and idx == 0:
-            env = gym.make(env_id, render_mode="rgb_array")
+            env = gym.make(env_id, render_mode="rgb_array", size=args.env_size)
             env = gym.wrappers.RecordVideo(env, f"videos/{run_name}")
         else:
-            env = gym.make(env_id)
+            env = gym.make(env_id, size=args.env_size)
         env = ImgObsWrapper(env)
         env = gym.wrappers.RecordEpisodeStatistics(env)
-
-        # env = NoopResetEnv(env, noop_max=30)
-        # env = MaxAndSkipEnv(env, skip=4)
-        # env = EpisodicLifeEnv(env)
-        # if "FIRE" in env.unwrapped.get_action_meanings():
-        #     env = FireResetEnv(env)
-        # env = ClipRewardEnv(env)
-        # env = gym.wrappers.ResizeObservation(env, (84, 84))
-        # env = gym.wrappers.GrayScaleObservation(env)
-        # env = gym.wrappers.FrameStack(env, 4)
 
         env.action_space.seed(seed)
         return env
@@ -234,7 +92,6 @@ def make_env(env_id, seed, idx, capture_video, run_name):
 class QNetwork(nn.Module):
     def __init__(self, envs: VectorEnv):
         super().__init__()
-        self.out = None
         height = envs.single_observation_space.shape[0]
         width = envs.single_observation_space.shape[1]
         n_input_channels = envs.single_observation_space.shape[2]
@@ -254,29 +111,12 @@ class QNetwork(nn.Module):
         output_size = output.shape[1] * output.shape[2] * output.shape[3]
 
         self.network = nn.Sequential(
-            nn.Conv2d(n_input_channels, 16, 8, padding=1),
-            nn.ReLU(),
-            nn.Conv2d(16, 32, 4, padding=1),
-            nn.ReLU(),
-            nn.Conv2d(32, 64, 3, padding=1),
-            nn.ReLU(),
+            conv_layers,
             nn.Flatten(),
             nn.Linear(output_size, 512),
             nn.ReLU(),
             nn.Linear(512, envs.single_action_space.n),
         )
-        # self.network = nn.Sequential(
-        #     nn.Conv2d(4, 32, 8, stride=4),
-        #     nn.ReLU(),
-        #     nn.Conv2d(32, 64, 4, stride=2),
-        #     nn.ReLU(),
-        #     nn.Conv2d(64, 64, 3, stride=1),
-        #     nn.ReLU(),
-        #     nn.Flatten(),
-        #     nn.Linear(3136, 512),
-        #     nn.ReLU(),
-        #     nn.Linear(512, envs.single_action_space.n),
-        # )
 
     def forward(self, x):
         x = x.permute(0, 3, 1, 2)

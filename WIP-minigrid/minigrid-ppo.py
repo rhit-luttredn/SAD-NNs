@@ -6,17 +6,12 @@ from dataclasses import dataclass
 
 import gymnasium as gym
 import numpy as np
+import sad_nns.envs
 import torch
 import torch.nn as nn
 import torch.optim as optim
 import tyro
-from gymnasium.envs.registration import register
 from gymnasium.vector import VectorEnv
-from minigrid.core.grid import Grid
-from minigrid.core.mission import MissionSpace
-from minigrid.core.world_object import Door, Goal, Key, Wall
-from minigrid.manual_control import ManualControl
-from minigrid.minigrid_env import MiniGridEnv
 from minigrid.wrappers import ImgObsWrapper
 from torch.distributions.categorical import Categorical
 from torch.utils.tensorboard import SummaryWriter
@@ -78,6 +73,9 @@ class Args:
     target_kl: float = None
     """the target KL divergence threshold"""
 
+    # Environment specific arguments
+    env_size: int = 10
+
     # to be filled in runtime
     batch_size: int = 0
     """the batch size (computed in runtime)"""
@@ -86,133 +84,14 @@ class Args:
     num_iterations: int = 0
     """the number of iterations (computed in runtime)"""
 
-class SimpleEnv(MiniGridEnv):
-    def __init__(
-        self,
-        size=5,
-        agent_start_pos=(1, 1),
-        agent_start_dir=0,
-        max_steps=None,
-        **kwargs,
-    ):
-        self.agent_start_pos = agent_start_pos
-        self.agent_start_dir = agent_start_dir
-
-        mission_space = MissionSpace(mission_func=self._gen_mission)
-
-        if max_steps is None:
-            max_steps = 4 * size**2
-
-        super().__init__(
-            mission_space=mission_space,
-            grid_size=size,
-            # Set this to True for maximum speed
-            see_through_walls=True,
-            max_steps=max_steps,
-            **kwargs,
-        )
-
-    @staticmethod
-    def _gen_mission():
-        return "grand mission"
-
-    def _gen_grid(self, width, height):
-        # Create an empty grid
-        self.grid = Grid(width, height)
-
-        # Generate the surrounding walls
-        self.grid.wall_rect(0, 0, width, height)
-
-        # # Generate verical separation wall
-        # for i in range(0, height - 2):
-        #     self.grid.set(2, i, Wall())
-
-        # Place a goal square in the bottom-right corner
-        self.put_obj(Goal(), width - 2, height - 4)
-
-        # Place the agent
-        if self.agent_start_pos is not None:
-            self.agent_pos = self.agent_start_pos
-            self.agent_dir = self.agent_start_dir
-        else:
-            self.place_agent()
-
-        self.mission = "grand mission"
-
-
-class ToughEnv(MiniGridEnv):
-    def __init__(
-        self,
-        size=10,
-        agent_start_pos=(1, 1),
-        agent_start_dir=0,
-        max_steps=None,
-        **kwargs,
-    ):
-        self.agent_start_pos = agent_start_pos
-        self.agent_start_dir = agent_start_dir
-
-        mission_space = MissionSpace(mission_func=self._gen_mission)
-
-        if max_steps is None:
-            max_steps = 4 * size**2
-
-        super().__init__(
-            mission_space=mission_space,
-            grid_size=size,
-            # Set this to True for maximum speed
-            see_through_walls=True,
-            max_steps=max_steps,
-            **kwargs,
-        )
-
-    @staticmethod
-    def _gen_mission():
-        return "grand mission"
-
-    def _gen_grid(self, width, height):
-        # Create an empty grid
-        self.grid = Grid(width, height)
-
-        # Generate the surrounding walls
-        self.grid.wall_rect(0, 0, width, height)
-
-        # Generate verical separation wall
-        for i in range(0, height - 2):
-            self.grid.set(2, i, Wall())
-
-        # Place a goal square in the bottom-right corner
-        self.put_obj(Goal(), width - 2, height - 4)
-
-        # Place the agent
-        if self.agent_start_pos is not None:
-            self.agent_pos = self.agent_start_pos
-            self.agent_dir = self.agent_start_dir
-        else:
-            self.place_agent()
-
-        self.mission = "grand mission"
-
-register(
-    id='SimpleEnv-v0',
-    entry_point='minigrid-ppo:SimpleEnv',
-    kwargs={'size': 10, 'agent_start_pos': (1, 1), 'agent_start_dir': 0}
-)
-
-register(
-    id='ToughEnv-v0',
-    entry_point='minigrid-ppo:ToughEnv',
-    kwargs={'size': 10, 'agent_start_pos': (1, 1), 'agent_start_dir': 0}
-)
-
 
 def make_env(env_id, idx, capture_video, run_name):
     def thunk():
         if capture_video and idx == 0:
-            env = gym.make(env_id, render_mode="rgb_array")
+            env = gym.make(env_id, render_mode="rgb_array", size=args.env_size)
             env = gym.wrappers.RecordVideo(env, f"videos/{run_name}")
         else:
-            env = gym.make(env_id)
+            env = gym.make(env_id, size=args.env_size)
         env = ImgObsWrapper(env)
         env = gym.wrappers.RecordEpisodeStatistics(env)
         return env
