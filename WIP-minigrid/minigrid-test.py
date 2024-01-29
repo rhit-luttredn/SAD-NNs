@@ -1,6 +1,9 @@
+#!/usr/bin/env python3
 from __future__ import annotations
 
 import itertools
+import time
+import matplotlib.pyplot as plt
 
 import gymnasium as gym
 import numpy as np
@@ -9,17 +12,22 @@ import torch
 from minigrid.core.constants import COLOR_NAMES
 from minigrid.wrappers import ImgObsWrapper
 from neurops.models import ModConv2d, ModLinear, ModSequential
-from stable_baselines3 import DQN, PPO
-from stable_baselines3.common.callbacks import BaseCallback
-from stable_baselines3.common.evaluation import evaluate_policy
+from stable_baselines3 import PPO, DQN
 from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
-from stable_baselines3.common.utils import set_random_seed
+from stable_baselines3.common.evaluation import evaluate_policy
 from stable_baselines3.dqn.policies import CnnPolicy
+from stable_baselines3.common.callbacks import BaseCallback
+from stable_baselines3.common.utils import set_random_seed
 from torch import nn
 
+total_architectures = 30
+architectures = []
+training_log = [[] for _ in range(total_architectures)]
+parameter_log = []
+neuron_log = []
 
 class MinigridFeaturesExtractor(BaseFeaturesExtractor):
-    def __init__(self, observation_space: gym.Space, features_dim: int = 512, normalized_image: bool = False) -> None:
+    def __init__(self, observation_space: gym.Space, arch_idx, features_dim: int = 512, normalized_image: bool = False) -> None:
         super().__init__(observation_space, features_dim)
         n_input_channels = observation_space.shape[0]
         # self.cnn = nn.Sequential(
@@ -32,11 +40,13 @@ class MinigridFeaturesExtractor(BaseFeaturesExtractor):
         #     nn.Flatten(),
         # )
         # models = generate_models(n_input_channels, 64, 25000, 5000)
-        models = generate_neuron_balanced_models()
-        model = models[2]
-        print(model)
+        intermediate_conv_sizes = [(8, 16, 32), (16, 32, 64), (32, 64, 128)]  # Each tuple is one possible set of sizes
+        intermediate_linear_sizes = [64, 128, 256]  # Each tuple is one possible set of sizes
+        models = generate_fixed_structure_models(n_input_channels, 64, intermediate_conv_sizes, intermediate_linear_sizes, 2000)
+        model = models[arch_idx]
+        architectures.append(model)
         total_params = count_parameters(model)
-        print(total_params)
+        parameter_log.append(total_params)
         self.cnn = model
 
         # Compute shape by doing one forward pass
@@ -49,9 +59,10 @@ class MinigridFeaturesExtractor(BaseFeaturesExtractor):
         return self.linear(self.cnn(observations))
     
 class PrintAverageRewardCallback(BaseCallback):
-    def __init__(self, print_freq):
+    def __init__(self, print_freq, arch_idx):
         super(PrintAverageRewardCallback, self).__init__(verbose=0)
         self.print_freq = print_freq
+        self.arch_idx = arch_idx
         self.episode_rewards = []
         self.episode_count = 0
         self.cumulative_reward = 0
@@ -73,7 +84,8 @@ class PrintAverageRewardCallback(BaseCallback):
             # Print average reward
             if self.episode_count % self.print_freq == 0:
                 average_reward = sum(self.episode_rewards[-self.print_freq:]) / self.print_freq
-                print(f"Episode {self.episode_count}: Average Reward: {average_reward}")
+                training_log[self.arch_idx].append(average_reward)
+                # print(f"Episode {self.episode_count}: Average Reward: {average_reward}")
 
         return True
 
@@ -115,66 +127,88 @@ def test_model(model, env, num_episodes=50):
             total_reward += reward
             
 
-            # env.render()  # Optional: Render the environment to visualize
+              # env.render()  # Optional: Render the environment to visualize
 
         print(f"Episode {episode + 1}: Total Reward = {total_reward}")
 
-# generate based on total parameters
-def generate_models(n_input_channels, n_output_channels, total_params, tolerance=500):
-    models = []
+# # generate based on total parameters
+# def generate_models(n_input_channels, n_output_channels, total_params, tolerance=500):
+#     models = []
     
-    # Helper function to calculate parameters for a Conv2d layer
-    def conv2d_params(in_channels, out_channels, kernel_size):
-        return (kernel_size[0] * kernel_size[1] * in_channels + 1) * out_channels
+#     # Helper function to calculate parameters for a Conv2d layer
+#     def conv2d_params(in_channels, out_channels, kernel_size):
+#         return (kernel_size[0] * kernel_size[1] * in_channels + 1) * out_channels
 
-    # Define possible layer sizes for intermediate layers
-    intermediate_layer_sizes = [16, 32, 64, 128]
+#     # Define possible layer sizes for intermediate layers
+#     intermediate_layer_sizes = [16, 32, 64, 128]
 
-    # Generate different model configurations
-    for size1 in intermediate_layer_sizes:
-        for size2 in intermediate_layer_sizes:
-            # Calculate the total parameters for this configuration
-            params = conv2d_params(n_input_channels, size1, (2, 2)) \
-                   + conv2d_params(size1, size2, (2, 2)) \
-                   + conv2d_params(size2, n_output_channels, (2, 2))
+#     # Generate different model configurations
+#     for size1 in intermediate_layer_sizes:
+#         for size2 in intermediate_layer_sizes:
+#             # Calculate the total parameters for this configuration
+#             params = conv2d_params(n_input_channels, size1, (2, 2)) \
+#                    + conv2d_params(size1, size2, (2, 2)) \
+#                    + conv2d_params(size2, n_output_channels, (2, 2))
 
-            # Check if the parameters are within the tolerance
-            if abs(params - total_params) <= tolerance:
-                model = nn.Sequential(
-                    nn.Conv2d(n_input_channels, size1, (2, 2)),
-                    nn.ReLU(),
-                    nn.Conv2d(size1, size2, (2, 2)),
-                    nn.ReLU(),
-                    nn.Conv2d(size2, n_output_channels, (2, 2)),
-                    nn.ReLU(),
-                    nn.Flatten(),
-                )
-                models.append(model)
+#             # Check if the parameters are within the tolerance
+#             if abs(params - total_params) <= tolerance:
+#                 model = nn.Sequential(
+#                     nn.Conv2d(n_input_channels, size1, (2, 2)),
+#                     nn.ReLU(),
+#                     nn.Conv2d(size1, size2, (2, 2)),
+#                     nn.ReLU(),
+#                     nn.Conv2d(size2, n_output_channels, (2, 2)),
+#                     nn.ReLU(),
+#                     nn.Flatten(),
+#                 )
+#                 models.append(model)
 
-    return models
-        
-def generate_neuron_balanced_models(input_size, output_size, total_neurons, layer_options):
+#     return models
+
+def generate_fixed_structure_models(input_channels, output_features, intermediate_conv_sizes, intermediate_linear_sizes, max_intermediate_neurons, max_total_params=None):
     models = []
 
-    # Helper function to calculate total neurons for a given configuration
-    def total_neurons_in_config(layers):
-        total = input_size + sum(layers) + output_size
-        return total
+    # Generate all possible combinations of intermediate layers
+    for conv_sizes in itertools.product(*intermediate_conv_sizes):
+        for linear_size in intermediate_linear_sizes:
+            # Check if the total number of neurons does not exceed the maximum
+            total_neurons = sum(conv_sizes) + linear_size 
+            
+            if total_neurons <= max_intermediate_neurons:
+                layers = []
 
-    # Generate all possible combinations of layers
-    for L in range(1, len(layer_options) + 1):
-        for subset in itertools.combinations_with_replacement(layer_options, L):
-            if total_neurons_in_config(subset) == total_neurons:
-                layers = [nn.Linear(input_size, subset[0])]
-                layers += [nn.Linear(subset[i], subset[i+1]) for i in range(len(subset) - 1)]
-                layers += [nn.Linear(subset[-1], output_size)]
+                # Add convolutional layers
+                in_channels = input_channels
+                for out_channels in conv_sizes:
+                    layers.append(nn.Conv2d(in_channels, out_channels, kernel_size=(2, 2)))
+                    layers.append(nn.ReLU())
+                    in_channels = out_channels
+
+                # Flatten the output of the last conv layer
+                layers.append(nn.Flatten())
+
+                # Add the two linear layers
+                in_features = in_channels * 16
+                layers.append(nn.Linear(in_features, linear_size))
+
+                # Add the final output layer
+                layers.append(nn.Linear(linear_size, output_features))
+
                 model = nn.Sequential(*layers)
-                models.append(model)
+                total_params = count_parameters(model)
+
+                if max_total_params is None or total_params <= max_total_params:
+                    neuron_log.append(total_neurons)
+                    models.append(model)
 
     return models
+
 
 
 def main():
+
+
+    start_time = time.time()
 
     set_random_seed(0)
     
@@ -182,20 +216,42 @@ def main():
     # env = ToughEnv(size=10, render_mode="human")
     # manual_control = ManualControl(env, seed=42)
     # manual_control.start()
+    
+    # /////////////////////////////////////////////////////////////////////
 
-    policy_kwargs = dict(
-        features_extractor_class=MinigridFeaturesExtractor,
-        features_extractor_kwargs=dict(features_dim=128),
-    )
+    # # Example usage
+    # input_channels = 3   # Input channels for the first convolutional layer
+    # output_features = 64 # Output features for the last linear layer
 
-    env = gym.make("MiniGrid-Empty-5x5-v0", render_mode="rgb_array") 
+    # # Define possible sizes for intermediate convolutional and linear layers
+    # intermediate_conv_sizes = [(8, 16, 32), (16, 32, 64), (32, 64, 128)]  # Each tuple is one possible set of sizes
+    # intermediate_linear_sizes = [64, 128, 256]  # Each tuple is one possible set of sizes
+
+    # models = generate_fixed_structure_models(input_channels, output_features, intermediate_conv_sizes, intermediate_linear_sizes, 1000, 50000)
+
+    # # Print or analyze the generated models
+    # for model in models:
+    #     print(model)
+    #     print(count_parameters(model))
+    #     print()
+
+    # print(len(models))
+
+    # /////////////////////////////////////////////////////////////////////
+
+    env = gym.make("ToughEnv-v0", render_mode="rgb_array") 
     env = ImgObsWrapper(env)
 
-    callback = PrintAverageRewardCallback(print_freq=100)
+    for i in range(total_architectures):
+        policy_kwargs = dict(
+            features_extractor_class=MinigridFeaturesExtractor,
+            features_extractor_kwargs=dict(arch_idx=i, features_dim=128),
+        )
+        callback = PrintAverageRewardCallback(print_freq=100, arch_idx=i)
+        model = PPO("CnnPolicy", env, policy_kwargs=policy_kwargs, verbose=0, )
+        model.learn(2e4, callback=callback)
 
-    # model = DQN.load('DQN-1', env=env)
-    model = PPO("CnnPolicy", env, policy_kwargs=policy_kwargs, verbose=0, )
-    model.learn(2e4, callback=callback)
+        print(f'Iteration {i}')
 
     # mean_reward, std_reward = evaluate_policy(model, model.get_env(), n_eval_episodes=10)
     # print(f"Mean reward: {mean_reward} +/- {std_reward}")
@@ -206,6 +262,39 @@ def main():
     # test_env = ImgObsWrapper(test_env)
 
     # test_model(model, test_env)
+        
+    # for i in range(total_architectures):
+    #     print(architectures[i])
+    #     print(parameter_log[i])
+    #     print(training_log[i])
+        
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(20, 6))
+
+    x1 = parameter_log
+    y = [np.mean(sub_array) for sub_array in training_log]
+
+    # Creating a scatter plot
+    ax1.scatter(x1, y)
+    ax1.set_xlabel('# Total Parameters')
+    ax1.set_ylabel('Average Training Reward')
+    ax1.set_title('Parameter Impact')
+    ax1.grid(True)
+
+    x2 = neuron_log[:total_architectures]
+
+    # Creating a scatter plot
+    ax2.scatter(x2, y)
+    ax2.set_xlabel('# Total Neurons')
+    ax2.set_ylabel('Average Training Reward')
+    ax2.set_title('Neuron Impact')
+    ax2.grid(True)
+
+    plt.show()
+
+        
+    end_time = time.time()
+    total_time = end_time - start_time
+    print("Total time to run file: {} seconds".format(total_time))
 
 
 if __name__ == "__main__":
