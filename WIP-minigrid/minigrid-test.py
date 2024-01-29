@@ -213,7 +213,7 @@ def main():
     set_random_seed(0)
     
     # manual control of environment
-    # env = ToughEnv(size=10, render_mode="human")
+    # env = WallEnv(size=10, render_mode="human")
     # manual_control = ManualControl(env, seed=42)
     # manual_control.start()
     
@@ -239,7 +239,7 @@ def main():
 
     # /////////////////////////////////////////////////////////////////////
 
-    env = gym.make("ToughEnv-v0", render_mode="rgb_array") 
+    env = gym.make("WallEnv-v0", render_mode="rgb_array") 
     env = ImgObsWrapper(env)
 
     for i in range(total_architectures):
