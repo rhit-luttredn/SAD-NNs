@@ -19,6 +19,7 @@ from gymnasium.vector import VectorEnv
 from minigrid.core.constants import COLOR_NAMES
 from minigrid.wrappers import ImgObsWrapper
 from neurops.models import ModConv2d, ModLinear, ModSequential
+from sad_nns.utils.cleanrl.evals.ppo_eval import evaluate
 from torch.distributions.categorical import Categorical
 from torch.utils.tensorboard import SummaryWriter
 # from stable_baselines3 import PPO, DQN
@@ -53,7 +54,7 @@ class Args:
     env_id: str = "SimpleEnv-v0"
     # env_id: str = "BreakoutNoFrameskip-v4"
     """the id of the environment"""
-    total_timesteps: int = 150_000
+    total_timesteps: int = 50_000
     """total timesteps of the experiments"""
     learning_rate: float = 2.5e-4
     """the learning rate of the optimizer"""
@@ -87,7 +88,7 @@ class Args:
     """the target KL divergence threshold"""
 
     # Experiment specific arguments
-    total_architectures: int = 30
+    total_architectures: int = 1
     """the number of architectures to test"""
 
     # Environment specific arguments
@@ -111,22 +112,22 @@ class Args:
     # """the list of neuron logs (computed in runtime)"""
     device: torch.device = None
     """the device to run the experiment on (computed in runtime)"""
+    env_kwargs: dict = None
+    """the additional kwargs to pass to the gym environment (computed in runtime)"""
 
 
 architectures = []
-training_log = []
 parameter_log = []
 neuron_log = []
 
 
-
-def make_env(env_id, idx, capture_video, run_name):
+def make_env(env_id, idx, capture_video, run_name, env_kwargs: dict = {}):
     def thunk():
         if capture_video and idx == 0:
-            env = gym.make(env_id, render_mode="rgb_array", size=args.env_size)
-            env = gym.wrappers.RecordVideo(env, f"videos/{run_name}")
+            env = gym.make(env_id, render_mode="rgb_array", **env_kwargs)
+            env = gym.wrappers.RecordVideo(env, f"../videos/{run_name}")
         else:
-            env = gym.make(env_id, size=args.env_size)
+            env = gym.make(env_id, **env_kwargs)
         env = ImgObsWrapper(env)
         env = gym.wrappers.RecordEpisodeStatistics(env)
         return env
@@ -194,69 +195,69 @@ class Agent(nn.Module):
         return action, probs.log_prob(action), probs.entropy(), self.critic(hidden)
 
 
-class MinigridFeaturesExtractor(BaseFeaturesExtractor):
-    def __init__(self, observation_space: gym.Space, arch_idx, features_dim: int = 512, normalized_image: bool = False) -> None:
-        super().__init__(observation_space, features_dim)
-        n_input_channels = observation_space.shape[0]
-        # self.cnn = nn.Sequential(
-        #     nn.Conv2d(n_input_channels, 16, (2, 2)),
-        #     nn.ReLU(),
-        #     nn.Conv2d(16, 32, (2, 2)),
-        #     nn.ReLU(),
-        #     nn.Conv2d(32, 64, (2, 2)),
-        #     nn.ReLU(),
-        #     nn.Flatten(),
-        # )
-        # models = generate_models(n_input_channels, 64, 25000, 5000)
-        intermediate_conv_sizes = [(8, 16, 32), (16, 32, 64), (32, 64, 128)]  # Each tuple is one possible set of sizes
-        intermediate_linear_sizes = [64, 128, 256]  # Each tuple is one possible set of sizes
-        models = generate_fixed_structure_models(n_input_channels, 64, intermediate_conv_sizes, intermediate_linear_sizes, 2000)
-        model = models[arch_idx]
-        architectures.append(model)
-        total_params = count_parameters(model)
-        parameter_log.append(total_params)
-        self.cnn = model
+# class MinigridFeaturesExtractor(BaseFeaturesExtractor):
+#     def __init__(self, observation_space: gym.Space, arch_idx, features_dim: int = 512, normalized_image: bool = False) -> None:
+#         super().__init__(observation_space, features_dim)
+#         n_input_channels = observation_space.shape[0]
+#         # self.cnn = nn.Sequential(
+#         #     nn.Conv2d(n_input_channels, 16, (2, 2)),
+#         #     nn.ReLU(),
+#         #     nn.Conv2d(16, 32, (2, 2)),
+#         #     nn.ReLU(),
+#         #     nn.Conv2d(32, 64, (2, 2)),
+#         #     nn.ReLU(),
+#         #     nn.Flatten(),
+#         # )
+#         # models = generate_models(n_input_channels, 64, 25000, 5000)
+#         intermediate_conv_sizes = [(8, 16, 32), (16, 32, 64), (32, 64, 128)]  # Each tuple is one possible set of sizes
+#         intermediate_linear_sizes = [64, 128, 256]  # Each tuple is one possible set of sizes
+#         models = generate_fixed_structure_models(n_input_channels, 64, intermediate_conv_sizes, intermediate_linear_sizes, 2000)
+#         model = models[arch_idx]
+#         architectures.append(model)
+#         total_params = count_parameters(model)
+#         parameter_log.append(total_params)
+#         self.cnn = model
 
-        # Compute shape by doing one forward pass
-        with torch.no_grad():
-            n_flatten = self.cnn(torch.as_tensor(observation_space.sample()[None]).float()).shape[1]
+#         # Compute shape by doing one forward pass
+#         with torch.no_grad():
+#             n_flatten = self.cnn(torch.as_tensor(observation_space.sample()[None]).float()).shape[1]
 
-        self.linear = nn.Sequential(nn.Linear(n_flatten, features_dim), nn.ReLU())
+#         self.linear = nn.Sequential(nn.Linear(n_flatten, features_dim), nn.ReLU())
 
-    def forward(self, observations: torch.Tensor) -> torch.Tensor:
-        return self.linear(self.cnn(observations))
+#     def forward(self, observations: torch.Tensor) -> torch.Tensor:
+#         return self.linear(self.cnn(observations))
 
 
-class PrintAverageRewardCallback(BaseCallback):
-    def __init__(self, print_freq, arch_idx):
-        super(PrintAverageRewardCallback, self).__init__(verbose=0)
-        self.print_freq = print_freq
-        self.arch_idx = arch_idx
-        self.episode_rewards = []
-        self.episode_count = 0
-        self.cumulative_reward = 0
+# class PrintAverageRewardCallback(BaseCallback):
+#     def __init__(self, print_freq, arch_idx):
+#         super(PrintAverageRewardCallback, self).__init__(verbose=0)
+#         self.print_freq = print_freq
+#         self.arch_idx = arch_idx
+#         self.episode_rewards = []
+#         self.episode_count = 0
+#         self.cumulative_reward = 0
 
-    def _on_step(self) -> bool:
-        # Retrieve reward and done flag
-        reward = self.locals['rewards'][0]
-        done = self.locals['dones'][0]
+#     def _on_step(self) -> bool:
+#         # Retrieve reward and done flag
+#         reward = self.locals['rewards'][0]
+#         done = self.locals['dones'][0]
 
-        # Update cumulative reward
-        self.cumulative_reward += reward
+#         # Update cumulative reward
+#         self.cumulative_reward += reward
 
-        # Check if episode is done
-        if done:
-            self.episode_rewards.append(self.cumulative_reward)
-            self.cumulative_reward = 0
-            self.episode_count += 1
+#         # Check if episode is done
+#         if done:
+#             self.episode_rewards.append(self.cumulative_reward)
+#             self.cumulative_reward = 0
+#             self.episode_count += 1
 
-            # Print average reward
-            if self.episode_count % self.print_freq == 0:
-                average_reward = sum(self.episode_rewards[-self.print_freq:]) / self.print_freq
-                training_log[self.arch_idx].append(average_reward)
-                # print(f"Episode {self.episode_count}: Average Reward: {average_reward}")
+#             # Print average reward
+#             if self.episode_count % self.print_freq == 0:
+#                 average_reward = sum(self.episode_rewards[-self.print_freq:]) / self.print_freq
+#                 training_log[self.arch_idx].append(average_reward)
+#                 # print(f"Episode {self.episode_count}: Average Reward: {average_reward}")
 
-        return True
+#         return True
 
 
 def convert_matrix_format(matrix):
@@ -281,27 +282,6 @@ def convert_matrix_format(matrix):
 
 def count_parameters(model):
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
-
-
-def test_model(model, env, num_episodes=50):
-    for episode in range(num_episodes):
-        obs = env.reset()[0]
-        done = False
-        truncated = False
-        total_reward = 0
-
-        while (not truncated and not done):
-            # obs_image = obs['image']
-            obs = convert_matrix_format(obs)
-            # print(obs)
-            action, _states = model.predict(obs, deterministic=True)
-            obs, reward, done, truncated, info = env.step(action)
-            total_reward += reward
-            
-
-              # env.render()  # Optional: Render the environment to visualize
-
-        print(f"Episode {episode + 1}: Total Reward = {total_reward}")
 
 
 def generate_fixed_structure_models(input_channels, output_features, intermediate_conv_sizes, intermediate_linear_sizes, max_intermediate_neurons, max_total_params=None):
@@ -395,7 +375,6 @@ def train_single_model(agent: Agent, optimizer, envs: VectorEnv, writer: Summary
                 for info in infos["final_info"]:
                     if info and "episode" in info:
                         print(f"global_step={global_step}, episodic_return={info['episode']['r']}")
-                        
                         writer.add_scalar("charts/episodic_return", info["episode"]["r"], global_step)
                         writer.add_scalar("charts/episodic_length", info["episode"]["l"], global_step)
 
@@ -493,7 +472,6 @@ def train_single_model(agent: Agent, optimizer, envs: VectorEnv, writer: Summary
         print("SPS:", int(global_step / (time.time() - start_time)))
         writer.add_scalar("charts/SPS", int(global_step / (time.time() - start_time)), global_step)
 
-    envs.close()
     writer.close()
 
 
@@ -502,6 +480,7 @@ def main():
     args.batch_size = int(args.num_envs * args.num_steps)
     args.minibatch_size = int(args.batch_size // args.num_minibatches)
     args.num_iterations = args.total_timesteps // args.batch_size
+    args.env_kwargs = {"size": args.env_size}
     run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
     if args.track:
         import wandb
@@ -522,11 +501,12 @@ def main():
     torch.manual_seed(args.seed)
     torch.backends.cudnn.deterministic = args.torch_deterministic
 
-    device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
+    args.device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
+    device = args.device
 
     # env setup
     envs = gym.vector.SyncVectorEnv(
-        [make_env(args.env_id, i, args.capture_video, run_name) for i in range(args.num_envs)],
+        [make_env(args.env_id, i, args.capture_video, run_name, env_kwargs=args.env_kwargs) for i in range(args.num_envs)],
     )
     assert isinstance(envs.single_action_space, gym.spaces.Discrete), "only discrete action space is supported"
 
@@ -537,20 +517,41 @@ def main():
     models = generate_fixed_structure_models(n_input_channels, output_features, intermediate_conv_sizes, intermediate_linear_sizes, 2000)
 
     start_time = time.time()
+    model_rewards = []
     for i, model in enumerate(models):
         print(f'Iteration {i}/{args.total_architectures}')
-        
+        print("Training...")
         writer = SummaryWriter(f"../runs/{run_name}/model-{i}")
         writer.add_text(
             "hyperparameters",
             "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])),
         )
 
-        training_log.append([])
         agent = Agent(envs, model=model, network_output_size=output_features).to(device)
         optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
 
         train_single_model(agent, optimizer, envs, writer, args)
+
+        # Test the model
+        print("Testing...")
+        model_path = f"../runs/{run_name}/model-{i}/{args.exp_name}.model"
+        torch.save(agent.state_dict(), model_path)
+        print(f"model {i} saved to {model_path}")
+
+        episodic_returns = evaluate(
+            model_path,
+            make_env,
+            args.env_id,
+            eval_episodes=10,
+            run_name=f"{run_name}-eval",
+            Model=Agent,
+            device=device,
+            capture_video=False,
+            env_kwargs=args.env_kwargs
+        )
+        model_rewards.append(np.mean(episodic_returns))
+        for idx, episodic_return in enumerate(episodic_returns):
+            writer.add_scalar("eval/episodic_return", episodic_return, idx)
 
 
         # policy_kwargs = dict(
@@ -577,10 +578,13 @@ def main():
     #     print(parameter_log[i])
     #     print(training_log[i])
         
+
+    envs.close()
+        
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(20, 6))
 
     x1 = parameter_log
-    y = [np.mean(sub_array) for sub_array in training_log]
+    y = [np.mean(sub_array) for sub_array in model_rewards]
 
     # Creating a scatter plot
     ax1.scatter(x1, y)
@@ -600,7 +604,6 @@ def main():
 
     plt.show()
 
-        
     end_time = time.time()
     total_time = end_time - start_time
     print("Total time to run file: {} seconds".format(total_time))
