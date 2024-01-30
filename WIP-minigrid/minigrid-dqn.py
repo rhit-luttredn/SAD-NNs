@@ -72,14 +72,18 @@ class Args:
     train_frequency: int = 4
     """the frequency of training"""
 
+    # to be filled in runtime
+    env_kwargs: dict = None
+    """the additional kwargs to pass to the gym environment (computed in runtime)"""
 
-def make_env(env_id, seed, idx, capture_video, run_name):
+
+def make_env(env_id, seed, idx, capture_video, run_name, env_kwargs: dict = {}):
     def thunk():
         if capture_video and idx == 0:
-            env = gym.make(env_id, render_mode="rgb_array", size=args.env_size)
-            env = gym.wrappers.RecordVideo(env, f"videos/{run_name}")
+            env = gym.make(env_id, render_mode="rgb_array", **env_kwargs)
+            env = gym.wrappers.RecordVideo(env, f"../videos/{run_name}")
         else:
-            env = gym.make(env_id, size=args.env_size)
+            env = gym.make(env_id, **env_kwargs)
         env = ImgObsWrapper(env)
         env = gym.wrappers.RecordEpisodeStatistics(env)
 
@@ -139,6 +143,7 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
 """
         )
     args = tyro.cli(Args)
+    args.env_kwargs = {"size": args.env_size}
     assert args.num_envs == 1, "vectorized envs are not supported at the moment"
     run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
     if args.track:
@@ -169,7 +174,7 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
 
     # env setup
     envs = gym.vector.SyncVectorEnv(
-        [make_env(args.env_id, args.seed + i, i, args.capture_video, run_name) for i in range(args.num_envs)]
+        [make_env(args.env_id, args.seed + i, i, args.capture_video, run_name, env_kwargs=args.env_kwargs) for i in range(args.num_envs)]
     )
     assert isinstance(envs.single_action_space, gym.spaces.Discrete), "only discrete action space is supported"
 

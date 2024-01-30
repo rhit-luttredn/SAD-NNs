@@ -15,8 +15,9 @@ def evaluate(
     device: torch.device = torch.device("cpu"),
     capture_video: bool = True,
     exploration_noise: float = 0.1,
+    env_kwargs: dict = {},
 ):
-    envs = gym.vector.SyncVectorEnv([make_env(env_id, 0, 0, capture_video, run_name)])
+    envs = gym.vector.SyncVectorEnv([make_env(env_id, 0, 0, capture_video, run_name, env_kwargs=env_kwargs)])
     actor = Model[0](envs).to(device)
     qf = Model[1](envs).to(device)
     actor_params, qf_params = torch.load(model_path, map_location=device)
