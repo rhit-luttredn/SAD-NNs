@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
-import itertools
 import os
 import random
 import time
 import matplotlib.pyplot as plt
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from itertools import product
 
 import gymnasium as gym
 import numpy as np
@@ -19,16 +19,10 @@ from gymnasium.vector import VectorEnv
 from minigrid.core.constants import COLOR_NAMES
 from minigrid.wrappers import ImgObsWrapper
 from neurops.models import ModConv2d, ModLinear, ModSequential
+from sad_nns.modules import PPOAgent
 from sad_nns.utils.cleanrl.evals.ppo_eval import evaluate
 from torch.distributions.categorical import Categorical
 from torch.utils.tensorboard import SummaryWriter
-# from stable_baselines3 import PPO, DQN
-# from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
-# from stable_baselines3.common.evaluation import evaluate_policy
-# from stable_baselines3.dqn.policies import CnnPolicy
-# from stable_baselines3.common.callbacks import BaseCallback
-# from stable_baselines3.common.utils import set_random_seed
-# from torch import nn
 
 
 @dataclass
@@ -52,9 +46,8 @@ class Args:
 
     # Algorithm specific arguments
     env_id: str = "SimpleEnv-v0"
-    # env_id: str = "BreakoutNoFrameskip-v4"
     """the id of the environment"""
-    total_timesteps: int = 50_000
+    total_timesteps: int = 15_000
     """total timesteps of the experiments"""
     learning_rate: float = 2.5e-4
     """the learning rate of the optimizer"""
@@ -88,8 +81,14 @@ class Args:
     """the target KL divergence threshold"""
 
     # Experiment specific arguments
-    total_architectures: int = 1
-    """the number of architectures to test"""
+    output_features: int = 64
+    """the number of output features for each model's feature extractor"""
+    conv_sizes: list = field(default_factory=lambda: [(8, 16), (16, 32)])
+    # conv_sizes: list = field(default_factory=lambda: [(8, 16, 32), (16, 32, 64), (32, 64, 128)])
+    """the possible output channels for the each convolutional layers. Each tuple is a set for one layer"""
+    linear_sizes: list = field(default_factory=lambda: [64])
+    # linear_sizes: list = field(default_factory=lambda: [64, 128, 256])
+    """the possible output sizes for the each linear layers. Each tuple is a set for one layer"""
 
     # Environment specific arguments
     env_size: int = 10
@@ -102,21 +101,12 @@ class Args:
     """the mini-batch size (computed in runtime)"""
     num_iterations: int = 0
     """the number of iterations (computed in runtime)"""
-    # architectures: list = None
-    # """the list of architectures to test (computed in runtime)"""
-    # training_log: list = None
-    # """the list of training logs (computed in runtime)"""
-    # parameter_log: list = None
-    # """the list of parameter logs (computed in runtime)"""
-    # neuron_log: list = None
-    # """the list of neuron logs (computed in runtime)"""
     device: torch.device = None
     """the device to run the experiment on (computed in runtime)"""
     env_kwargs: dict = None
     """the additional kwargs to pass to the gym environment (computed in runtime)"""
 
 
-architectures = []
 parameter_log = []
 neuron_log = []
 
@@ -144,7 +134,7 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
 class Agent(nn.Module):
     def __init__(self, envs: VectorEnv, network = None, network_output_size: int = 512):
         super().__init__()
-        if network is not None != network_output_size is not None:
+        if (network is not None) != (network_output_size is not None):
             raise ValueError("Please provide both `network` and `network_output_size` or none of them.")
 
         if network is not None:
@@ -195,107 +185,18 @@ class Agent(nn.Module):
         return action, probs.log_prob(action), probs.entropy(), self.critic(hidden)
 
 
-# class MinigridFeaturesExtractor(BaseFeaturesExtractor):
-#     def __init__(self, observation_space: gym.Space, arch_idx, features_dim: int = 512, normalized_image: bool = False) -> None:
-#         super().__init__(observation_space, features_dim)
-#         n_input_channels = observation_space.shape[0]
-#         # self.cnn = nn.Sequential(
-#         #     nn.Conv2d(n_input_channels, 16, (2, 2)),
-#         #     nn.ReLU(),
-#         #     nn.Conv2d(16, 32, (2, 2)),
-#         #     nn.ReLU(),
-#         #     nn.Conv2d(32, 64, (2, 2)),
-#         #     nn.ReLU(),
-#         #     nn.Flatten(),
-#         # )
-#         # models = generate_models(n_input_channels, 64, 25000, 5000)
-#         intermediate_conv_sizes = [(8, 16, 32), (16, 32, 64), (32, 64, 128)]  # Each tuple is one possible set of sizes
-#         intermediate_linear_sizes = [64, 128, 256]  # Each tuple is one possible set of sizes
-#         models = generate_fixed_structure_models(n_input_channels, 64, intermediate_conv_sizes, intermediate_linear_sizes, 2000)
-#         model = models[arch_idx]
-#         architectures.append(model)
-#         total_params = count_parameters(model)
-#         parameter_log.append(total_params)
-#         self.cnn = model
-
-#         # Compute shape by doing one forward pass
-#         with torch.no_grad():
-#             n_flatten = self.cnn(torch.as_tensor(observation_space.sample()[None]).float()).shape[1]
-
-#         self.linear = nn.Sequential(nn.Linear(n_flatten, features_dim), nn.ReLU())
-
-#     def forward(self, observations: torch.Tensor) -> torch.Tensor:
-#         return self.linear(self.cnn(observations))
-
-
-# class PrintAverageRewardCallback(BaseCallback):
-#     def __init__(self, print_freq, arch_idx):
-#         super(PrintAverageRewardCallback, self).__init__(verbose=0)
-#         self.print_freq = print_freq
-#         self.arch_idx = arch_idx
-#         self.episode_rewards = []
-#         self.episode_count = 0
-#         self.cumulative_reward = 0
-
-#     def _on_step(self) -> bool:
-#         # Retrieve reward and done flag
-#         reward = self.locals['rewards'][0]
-#         done = self.locals['dones'][0]
-
-#         # Update cumulative reward
-#         self.cumulative_reward += reward
-
-#         # Check if episode is done
-#         if done:
-#             self.episode_rewards.append(self.cumulative_reward)
-#             self.cumulative_reward = 0
-#             self.episode_count += 1
-
-#             # Print average reward
-#             if self.episode_count % self.print_freq == 0:
-#                 average_reward = sum(self.episode_rewards[-self.print_freq:]) / self.print_freq
-#                 training_log[self.arch_idx].append(average_reward)
-#                 # print(f"Episode {self.episode_count}: Average Reward: {average_reward}")
-
-#         return True
-
-
-def convert_matrix_format(matrix):
-    """
-    Converts a 3D matrix of shape (7, 7, 3) to a 4D matrix of shape (1, 3, 7, 7).
-
-    :param matrix: A 3D NumPy array of shape (7, 7, 3).
-    :return: A 4D NumPy array of shape (1, 3, 7, 7).
-    """
-    # Check if the input matrix has the expected shape
-    if matrix.shape != (7, 7, 3):
-        raise ValueError("Input matrix must have shape (7, 7, 3)")
-
-    # Transpose the matrix from shape (7, 7, 3) to (3, 7, 7)
-    transposed_matrix = np.transpose(matrix, (2, 0, 1))
-
-    # Add an extra dimension to get shape (1, 3, 7, 7)
-    reshaped_matrix = np.expand_dims(transposed_matrix, axis=0)
-
-    return reshaped_matrix
-
-
-def count_parameters(model):
+def count_parameters(model: nn.Module):
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
 
-def generate_fixed_structure_models(input_channels, output_features, intermediate_conv_sizes, intermediate_linear_sizes, max_intermediate_neurons, max_total_params=None):
+def generate_fixed_structure_models(input_channels, output_features, possible_conv_sizes, possible_linear_sizes):
     models = []
-
+    # TODO: Implement using multiple linear layers
     # Generate all possible combinations of intermediate layers
-    for conv_sizes in itertools.product(*intermediate_conv_sizes):
-        for linear_size in intermediate_linear_sizes:
+    for conv_sizes in product(*possible_conv_sizes):
+        for linear_size in possible_linear_sizes:
             # Check if the total number of neurons does not exceed the maximum
             total_neurons = sum(conv_sizes) + linear_size 
-
-            # Skip if too many neurons
-            if total_neurons > max_intermediate_neurons:
-                continue
 
             layers = []
 
@@ -320,10 +221,9 @@ def generate_fixed_structure_models(input_channels, output_features, intermediat
             
             total_params = count_parameters(model)
 
-            if max_total_params is None or total_params <= max_total_params:
-                neuron_log.append(total_neurons)
-                parameter_log.append(total_params)
-                models.append(model)
+            neuron_log.append(total_neurons)
+            parameter_log.append(total_params)
+            models.append(model)
 
     return models
 
@@ -472,8 +372,6 @@ def train_single_model(agent: Agent, optimizer, envs: VectorEnv, writer: Summary
         print("SPS:", int(global_step / (time.time() - start_time)))
         writer.add_scalar("charts/SPS", int(global_step / (time.time() - start_time)), global_step)
 
-    writer.close()
-
 
 def main():
     args = tyro.cli(Args)
@@ -511,24 +409,43 @@ def main():
     assert isinstance(envs.single_action_space, gym.spaces.Discrete), "only discrete action space is supported"
 
     n_input_channels = envs.single_observation_space.shape[2]
-    output_features = 64
-    intermediate_conv_sizes = [(8, 16, 32), (16, 32, 64), (32, 64, 128)]
-    intermediate_linear_sizes = [64, 128, 256]
-    models = generate_fixed_structure_models(n_input_channels, output_features, intermediate_conv_sizes, intermediate_linear_sizes, 2000)
+    architectures = generate_fixed_structure_models(
+        n_input_channels,
+        args.output_features,
+        args.conv_sizes,
+        args.linear_sizes,
+    )
 
+    # Generate all possible combinations of architectures
+    # arch_params = [args.conv_sizes, args.linear_sizes]
+    # architectures = list(product(*[product(*x) for x in arch_params]))
+
+    # Iterate through each architecture
     start_time = time.time()
     model_rewards = []
-    for i, model in enumerate(models):
-        print(f'Iteration {i}/{args.total_architectures}')
+    # for i, (conv_sizes, linear_sizes) in enumerate(architectures):
+    for i, model in enumerate(architectures):
+        print(f'Iteration {i}/{len(architectures)}')
+        # model_kwargs = {
+        #     "conv_sizes": conv_sizes,
+        #     "linear_sizes": linear_sizes,
+        #     "out_features": args.output_features,
+        # }
+        # print(model_kwargs)
+        model_kwargs = {
+            "network": model,
+            "network_output_size": args.output_features,
+        }
+        agent = Agent(envs, **model_kwargs).to(device)
+        # agent = Agent(envs, network=model, network_output_size=args.output_features).to(device)
+        optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
+
         print("Training...")
         writer = SummaryWriter(f"../runs/{run_name}/model-{i}")
         writer.add_text(
             "hyperparameters",
             "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])),
         )
-
-        agent = Agent(envs, model=model, network_output_size=output_features).to(device)
-        optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
 
         train_single_model(agent, optimizer, envs, writer, args)
 
@@ -547,40 +464,17 @@ def main():
             Model=Agent,
             device=device,
             capture_video=False,
-            env_kwargs=args.env_kwargs
+            env_kwargs=args.env_kwargs,
+            model_kwargs=model_kwargs,
         )
         model_rewards.append(np.mean(episodic_returns))
         for idx, episodic_return in enumerate(episodic_returns):
             writer.add_scalar("eval/episodic_return", episodic_return, idx)
-
-
-        # policy_kwargs = dict(
-        #     features_extractor_class=MinigridFeaturesExtractor,
-        #     features_extractor_kwargs=dict(arch_idx=i, features_dim=128),
-        # )
-        # callback = PrintAverageRewardCallback(print_freq=100, arch_idx=i)
-        # model = PPO("CnnPolicy", env, policy_kwargs=policy_kwargs, verbose=0, )
-        # model.learn(2e4, callback=callback)
-
-
-    # mean_reward, std_reward = evaluate_policy(model, model.get_env(), n_eval_episodes=10)
-    # print(f"Mean reward: {mean_reward} +/- {std_reward}")
-
-    # # model.save('DQN-1')
-
-    # test_env = gym.make("MiniGrid-Empty-5x5-v0", render_mode="rgb_array") 
-    # test_env = ImgObsWrapper(test_env)
-
-    # test_model(model, test_env)
         
-    # for i in range(total_architectures):
-    #     print(architectures[i])
-    #     print(parameter_log[i])
-    #     print(training_log[i])
-        
+        writer.close()
 
     envs.close()
-        
+
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(20, 6))
 
     x1 = parameter_log
@@ -593,7 +487,7 @@ def main():
     ax1.set_title('Parameter Impact')
     ax1.grid(True)
 
-    x2 = neuron_log[:args.total_architectures]
+    x2 = neuron_log
 
     # Creating a scatter plot
     ax2.scatter(x2, y)
