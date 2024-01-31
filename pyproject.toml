@@ -7,7 +7,7 @@ readme = "README.md"
 
 [tool.poetry.dependencies]
 python = "^3.9"
-neurops = { path = "external/NeurOps/pytorch" }
+neurops = { path = "external/NeurOps/pytorch", develop = true }
 labml-nn = { path = "external/annotated_deep_learning_paper_implementations" }
 matplotlib = "^3.8.2"
 jupyter = "^1.0.0"
