@@ -21,8 +21,6 @@ from neurops import NORTH_score
 from torch.distributions.categorical import Categorical
 from torch.utils.tensorboard import SummaryWriter
 
-torch.cuda.device(6)
-
 
 @dataclass
 class Args:
@@ -83,7 +81,12 @@ class Args:
     """the target KL divergence threshold"""
 
     # NORTH specific arguments
+    growth: bool = True
+    """if toggled, the network will grow"""
+    iterations_to_grow: int = 1
+    """the grow the network every n iterations"""
     threshold: float = 0.005
+    """the threshold to grow the network"""
 
     # Environment specific arguments
     env_size: int = 10
@@ -369,26 +372,24 @@ if __name__ == "__main__":
         print("SPS:", int(global_step / (time.time() - start_time)))
         writer.add_scalar("charts/SPS", int(global_step / (time.time() - start_time)), global_step)
 
-        # NORTH
-        modded_model_grow = agent.growth_net
-
-        if iteration % 1 == 0:
+        # NORTH Growing
+        if iteration % args.iterations_to_grow == 0:
             print(iteration)
-            for i in range(len(modded_model_grow)-1):
-                # print("The size of activation of layer {}: {}".format(i, modded_model_grow.activations[str(i)].shape))
+            for i in range(len(agent.growth_net)-1):
+                # print("The size of activation of layer {}: {}".format(i, agent.growth_net.activations[str(i)].shape))
                 # print("The size of my activation of layer {}: {}".format(i, activation[str(i)].shape))
-                #score = orthogonality_gap(modded_model_grow.activations[str(i)])
-                max_rank = modded_model_grow[i].width()
-                # score = NORTH_score(modded_model_grow.activations[str(i)], batchsize=batch_size)
+                #score = orthogonality_gap(agent.growth_net.activations[str(i)])
+                max_rank = agent.growth_net[i].width()
+                # score = NORTH_score(agent.growth_net.activations[str(i)], batchsize=batch_size)
                 score = NORTH_score(agent.activation[str(i)], batchsize=args.batch_size, threshold=args.threshold)
-                # score = NORTH_score(modded_model_grow[i].weight, batchsize=batch_size)
-                if iteration == 1:
+                # score = NORTH_score(agent.growth_net[i].weight, batchsize=batch_size)
+                if iteration == args.iterations_to_grow:
                     initial_scores.append(score)
                 initScore = 0.97 * initial_scores[i]
-                to_add = max(0, int(modded_model_grow[i].weight.size()[0] * (score - initScore)))
+                to_add = max(0, int(agent.growth_net[i].weight.size()[0] * (score - initScore)))
                 print("Layer {} score: {}/{}, neurons to add: {}".format(i, score, max_rank, to_add))
 
-                modded_model_grow.grow(i, to_add, fanin_weights="kaiming_uniform", optimizer=optimizer)
+                agent.growth_net.grow(i, to_add, fanin_weights="kaiming_uniform", optimizer=optimizer)
 
     if args.save_model:
         model_path = f"../runs/{run_name}/{args.exp_name}.model"
