@@ -22,6 +22,7 @@ from neurops.models import ModConv2d, ModLinear, ModSequential
 from sad_nns.modules import PPOAgent
 from sad_nns.utils.cleanrl.evals.ppo_eval import evaluate
 from torch.distributions.categorical import Categorical
+from torchinfo import summary
 from torch.utils.tensorboard import SummaryWriter
 
 
@@ -47,13 +48,13 @@ class Args:
     # Algorithm specific arguments
     env_id: str = "SimpleEnv-v0"
     """the id of the environment"""
-    total_timesteps: int = 15_000
+    total_timesteps: int = 50_000
     """total timesteps of the experiments"""
     learning_rate: float = 2.5e-4
     """the learning rate of the optimizer"""
     num_envs: int = 8
     """the number of parallel game environments"""
-    num_steps: int = 128
+    num_steps: int = 256
     """the number of steps to run in each environment per policy rollout"""
     anneal_lr: bool = True
     """Toggle learning rate annealing for policy and value networks"""
@@ -86,6 +87,7 @@ class Args:
     conv_sizes: list = field(default_factory=lambda: [(8, 16), (16, 32)])
     # conv_sizes: list = field(default_factory=lambda: [(8, 16, 32), (16, 32, 64), (32, 64, 128)])
     """the possible output channels for the each convolutional layers. Each tuple is a set for one layer"""
+    # linear_sizes: list = field(default_factory=lambda: [[64], [64], [64]])
     linear_sizes: list = field(default_factory=lambda: [64])
     # linear_sizes: list = field(default_factory=lambda: [64, 128, 256])
     """the possible output sizes for the each linear layers. Each tuple is a set for one layer"""
@@ -170,7 +172,6 @@ class Agent(nn.Module):
             self.actor = layer_init(nn.Linear(network_output_size, envs.single_action_space.n), std=0.01)
             self.critic = layer_init(nn.Linear(network_output_size, 1), std=1)
 
-
     def get_value(self, x):
         x = x.permute(0, 3, 1, 2)
         return self.critic(self.network(x / 255.0))
@@ -228,7 +229,7 @@ def generate_fixed_structure_models(input_channels, output_features, possible_co
     return models
 
 
-def train_single_model(agent: Agent, optimizer, envs: VectorEnv, writer: SummaryWriter, args: Args):
+def train_single_model(agent, optimizer, envs: VectorEnv, writer: SummaryWriter, args: Args):
     device = args.device
 
     # ALGO Logic: Storage setup
@@ -425,20 +426,24 @@ def main():
     model_rewards = []
     # for i, (conv_sizes, linear_sizes) in enumerate(architectures):
     for i, model in enumerate(architectures):
-        print(f'Iteration {i}/{len(architectures)}')
+        print(f'Iteration {i}/{len(architectures) - 1}')
         # model_kwargs = {
         #     "conv_sizes": conv_sizes,
         #     "linear_sizes": linear_sizes,
         #     "out_features": args.output_features,
         # }
-        # print(model_kwargs)
         model_kwargs = {
             "network": model,
             "network_output_size": args.output_features,
         }
+        
+        # print(model_kwargs)
         agent = Agent(envs, **model_kwargs).to(device)
-        # agent = Agent(envs, network=model, network_output_size=args.output_features).to(device)
         optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
+
+        print(agent.network)
+        parameter_log[i] = count_parameters(agent.network)
+        neuron_log[i] = sum(p.numel() for p in agent.network.parameters() if p.requires_grad)
 
         print("Training...")
         writer = SummaryWriter(f"../runs/{run_name}/model-{i}")
