@@ -1,5 +1,6 @@
 from gymnasium import register
 from sad_nns.envs.hardwall import HardWallEnv
+from sad_nns.envs.minefield import MineFieldEnv
 from sad_nns.envs.simple import SimpleEnv
 from sad_nns.envs.wall import WallEnv
 
@@ -16,4 +17,9 @@ register(
 register(
     id='HardWallEnv-v0',
     entry_point='sad_nns.envs:HardWallEnv',
+)
+
+register(
+    id='MineFieldEnv-v0',
+    entry_point='sad_nns.envs:MineFieldEnv',
 )
