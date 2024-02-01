@@ -19,6 +19,31 @@ from torch.utils.tensorboard import SummaryWriter
 
 
 @dataclass
+class EnvArgs:
+    """the rendering mode"""
+    size: int|None = 10
+    """the height and width of the environment"""
+    width: int|None = None
+    """the width of the environment"""
+    height: int|None = None
+    """the height of the environment"""
+    agent_start_pos: tuple|None = None
+    """the starting position of the agent"""
+    agent_start_dir: int = 0
+    """the starting direction of the agent"""
+    max_steps: int|None = None
+    """the maximum number of steps before the environment is terminated"""
+    see_through_walls: bool = True
+    """whether the agent can see through walls"""
+    wall_freq: int = 2
+    """FOR HARDWALL: the number of tiles between walls"""
+    use_lava: bool = False
+    """FOR HARDWALL: whether to use lava"""
+    lock_doors: bool = False
+    """FOR HARDWALL: whether to lock doors"""
+
+
+@dataclass
 class Args:
     exp_name: str = os.path.basename(__file__)[: -len(".py")]
     """the name of this experiment"""
@@ -34,15 +59,15 @@ class Args:
     """if toggled, this experiment will be tracked with Weights and Biases"""
     wandb_project_name: str = "cleanRL"
     """the wandb's project name"""
-    wandb_entity: str = None
+    wandb_entity: str|None = None
     """the entity (team) of wandb's project"""
-    capture_video: bool = False
+    capture_video: bool = True
     """whether to capture videos of the agent performances (check out `videos` folder)"""
     save_model: bool = True
     """whether to save model into the `runs/{run_name}` folder"""
 
     # Algorithm specific arguments
-    env_id: str = "SimpleEnv-v0"
+    env_id: str = "HardWallEnv-v0"
     """the id of the environment"""
     total_timesteps: int = 100_000
     """total timesteps of the experiments"""
@@ -74,12 +99,8 @@ class Args:
     """coefficient of the value function"""
     max_grad_norm: float = 0.5
     """the maximum norm for the gradient clipping"""
-    target_kl: float = None
+    target_kl: float|None = None
     """the target KL divergence threshold"""
-
-    # Environment specific arguments
-    env_size: int = 10
-    """the height and width of the environment"""
 
     # to be filled in runtime
     batch_size: int = 0
@@ -88,7 +109,7 @@ class Args:
     """the mini-batch size (computed in runtime)"""
     num_iterations: int = 0
     """the number of iterations (computed in runtime)"""
-    env_kwargs: dict = None
+    env_kwargs: dict|None = None
     """the additional kwargs to pass to the gym environment (computed in runtime)"""
 
 
@@ -159,14 +180,13 @@ class Agent(nn.Module):
 
 if __name__ == "__main__":
     args = tyro.cli(Args)
+    env_args = vars(EnvArgs())
     args.batch_size = int(args.num_envs * args.num_steps)
     args.minibatch_size = int(args.batch_size // args.num_minibatches)
     args.num_iterations = args.total_timesteps // args.batch_size
-    args.env_kwargs = {"size": args.env_size}
     run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
     if args.track:
         import wandb
-
         wandb.init(
             project=args.wandb_project_name,
             entity=args.wandb_entity,
@@ -194,7 +214,7 @@ if __name__ == "__main__":
 
     # env setup
     envs = gym.vector.SyncVectorEnv(
-        [make_env(args.env_id, i, args.capture_video, run_name, env_kwargs=args.env_kwargs) for i in range(args.num_envs)],
+        [make_env(args.env_id, i, args.capture_video, run_name, env_kwargs=env_args) for i in range(args.num_envs)],
     )
     assert isinstance(envs.single_action_space, gym.spaces.Discrete), "only discrete action space is supported"
 
@@ -357,7 +377,7 @@ if __name__ == "__main__":
             Model=Agent,
             device=device,
             capture_video=True,
-            env_kwargs=args.env_kwargs
+            env_kwargs=env_args
         )
         for idx, episodic_return in enumerate(episodic_returns):
             writer.add_scalar("eval/episodic_return", episodic_return, idx)

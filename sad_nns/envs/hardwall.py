@@ -27,9 +27,9 @@ class HardWallEnv(MiniGridEnv):
         assert width is not None and height is not None
 
         if max_steps is None:
-            max_steps = 4 * height * width
+            max_steps = 8 * height * width
 
-        assert wall_freq > 0
+        assert wall_freq > (0 if not lock_doors else 1)
 
         self.agent_start_pos = agent_start_pos
         self.agent_start_dir = agent_start_dir
@@ -59,6 +59,13 @@ class HardWallEnv(MiniGridEnv):
         # Generate the surrounding walls
         self.grid.wall_rect(0, 0, width, height)
 
+        # Place the agent
+        if self.agent_start_pos is not None:
+            self.agent_pos = self.agent_start_pos
+        else:
+            self.agent_pos = (1, int(height/2))
+        self.agent_dir = self.agent_start_dir
+
         # Place a goal square in the bottom-right corner
         self.put_obj(Goal(), width - 2, height - 2)
 
@@ -66,7 +73,7 @@ class HardWallEnv(MiniGridEnv):
         sep_obj = Wall if not self.use_lava else Lava
         curr_x = self.wall_freq + 1
         while curr_x < width - 2:
-            self.grid.vert_wall(curr_x, 0, obj_type=sep_obj)
+            self.grid.vert_wall(curr_x, 1, length=height-2, obj_type=sep_obj)
 
             door_y = self._rand_int(1, height - 1)
             door_color = self._rand_int(0, len(COLOR_NAMES))
@@ -75,15 +82,11 @@ class HardWallEnv(MiniGridEnv):
 
             if self.lock_doors:
                 key_loc = self._rand_pos(curr_x - self.wall_freq, curr_x, 1, height - 1)
+                while key_loc == self.agent_pos:
+                    key_loc = self._rand_pos(curr_x - self.wall_freq, curr_x, 1, height - 1)
+
                 self.put_obj(Key(COLOR_NAMES[door_color]), *key_loc)
             
             curr_x += self.wall_freq + 1
-
-        # Place the agent
-        if self.agent_start_pos is not None:
-            self.agent_pos = self.agent_start_pos
-        else:
-            self.agent_pos = (1, int(height/2))
-        self.agent_dir = self.agent_start_dir
 
         self.mission = "grand mission"

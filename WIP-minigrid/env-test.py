@@ -27,11 +27,11 @@ class Args:
     """the maximum number of steps before the environment is terminated"""
     see_through_walls: bool = True
     """whether the agent can see through walls"""
-    wall_freq: int = 2
+    wall_freq: int = 3
     """FOR HARDWALL: the number of tiles between walls"""
     use_lava: bool = False
     """FOR HARDWALL: whether to use lava"""
-    lock_doors: bool = False
+    lock_doors: bool = True
     """FOR HARDWALL: whether to lock doors"""
 
 
@@ -43,6 +43,6 @@ if __name__ == "__main__":
     args = {k: v for k, v in args.items() if v is not None}
     env = make(env_id, **args)
     if args["render_mode"] == "human":
-        manual_control = ManualControl(env, seed=42)
+        manual_control = ManualControl(env)
         manual_control.start()
-        env.render()
+        # env.render()
