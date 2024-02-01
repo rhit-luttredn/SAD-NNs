@@ -28,6 +28,8 @@ class Args:
     """if toggled, `torch.backends.cudnn.deterministic=False`"""
     cuda: bool = True
     """if toggled, cuda will be enabled by default"""
+    gpu_idx: int = 0
+    """set the default gpu to use for the experiment"""
     track: bool = False
     """if toggled, this experiment will be tracked with Weights and Biases"""
     wandb_project_name: str = "cleanRL"
@@ -36,14 +38,13 @@ class Args:
     """the entity (team) of wandb's project"""
     capture_video: bool = False
     """whether to capture videos of the agent performances (check out `videos` folder)"""
-    save_model: bool = False
+    save_model: bool = True
     """whether to save model into the `runs/{run_name}` folder"""
 
     # Algorithm specific arguments
     env_id: str = "SimpleEnv-v0"
-    # env_id: str = "BreakoutNoFrameskip-v4"
     """the id of the environment"""
-    total_timesteps: int = 15_000
+    total_timesteps: int = 100_000
     """total timesteps of the experiments"""
     learning_rate: float = 2.5e-4
     """the learning rate of the optimizer"""
@@ -188,6 +189,8 @@ if __name__ == "__main__":
     torch.backends.cudnn.deterministic = args.torch_deterministic
 
     device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
+    if args.cuda and torch.cuda.is_available():
+        torch.cuda.set_device(args.gpu_idx)
 
     # env setup
     envs = gym.vector.SyncVectorEnv(
@@ -353,7 +356,7 @@ if __name__ == "__main__":
             run_name=f"{run_name}-eval",
             Model=Agent,
             device=device,
-            capture_video=False,
+            capture_video=True,
             env_kwargs=args.env_kwargs
         )
         for idx, episodic_return in enumerate(episodic_returns):
