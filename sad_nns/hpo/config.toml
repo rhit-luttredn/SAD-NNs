@@ -1,0 +1,52 @@
+[data]
+# One of 'mnist', 'cifar10', 'cifar100'
+dataset = 'mnist'
+image_size = 14
+train_val_split = 0.9
+
+[edl]
+# One of 'max_likelihood_loss', 'cross_entropy_bayes_risk', or 'squared_error_bayes_risk'
+criterion = 'max_likelihood_loss'
+
+[north]
+# How to decide whether to grow or prune. 'prune', 'grow', 'alternate', 'random', or a custom strategy name
+grow_prune_strategy = 'alternate'
+# How many times to grow or prune
+grow_prune_cycles = 6
+# How many epochs to train for each grow or prune cycle
+epochs_per_cycle = 2
+# Currently only 'effective_rank' is supported
+grow_metric = 'effective_rank'
+# Currently only 'svd_score' is supported
+prune_metric = 'weight_sum'
+
+# Metric config for the grow and prune metrics
+# Make sure use '<metric_name>.<config_name>' as the key
+# IMPORTANT NOTE: `tensor` is a special config that must be set for each metric
+[north.metric_params]
+# One of 'activation' or 'weight'
+effective_rank.tensor = 'weight'
+effective_rank.threshold = 0.01
+effective_rank.partial = false
+effective_rank.scale = true
+effective_rank.limit_ratio = -1
+
+# One of 'activation' or 'weight'
+svd_score.tensor = 'activation'
+svd_score.threshold = 0.01
+svd_score.addwhole = false
+svd_score.scale = true
+svd_score.difference = false
+svd_score.limit_ratio = -1
+
+# MUST BE 'weight'
+weight_sum.tensor = 'weight'
+weight_sum.p = 1
+weight_sum.fanin = true
+weight_sum.conversion_factor = -1
+
+
+[hyperparameters]
+learning_rate = 0.01
+epochs = 1
+batch_size = 128
