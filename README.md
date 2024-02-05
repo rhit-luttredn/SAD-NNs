@@ -80,7 +80,7 @@ _For more examples, please refer to the [Documentation](https://example.com)_
 David Gottlieb - j.david.gottlieb@gmail.com \
 Dylan Luttrell - dylanluttrell9591@gmail.com \
 Helen Wang - ___@gmail.com \
-Julian Fiorito - ___@gmail.com
+Julian Fiorito - jxfiorito@gmail.com
 
 Project Link: https://github.com/rhit-luttredn/SAD-NNs
 

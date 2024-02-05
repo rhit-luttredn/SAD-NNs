@@ -7,7 +7,7 @@ readme = "README.md"
 
 [tool.poetry.dependencies]
 python = "^3.9"
-neurops = { path = "external/NeurOps/pytorch" }
+neurops = { path = "external/NeurOps/pytorch", develop = true }
 labml-nn = { path = "external/annotated_deep_learning_paper_implementations" }
 matplotlib = "^3.8.2"
 jupyter = "^1.0.0"
@@ -19,6 +19,15 @@ tomli = "^2.0.1"
 scikit-image = "^0.22.0"
 torchrl = "^0.2.1"
 scikit-learn = "^1.3.2"
+gym = "^0.26.2"
+stable-baselines3 = "^2.2.1"
+minigrid = "^2.3.1"
+tyro = "^0.7.0"
+tensorboard = "^2.15.1"
+torchinfo = "^1.8.0"
+gymnasium = "^0.29.1"
+moviepy = "^1.0.3"
+isort = "^5.13.2"
 
 [build-system]
 requires = ["poetry-core"]
