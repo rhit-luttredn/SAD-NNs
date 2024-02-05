@@ -1,7 +1,6 @@
 from sklearn.datasets import make_regression
 from sklearn.model_selection import train_test_split
 import numpy as np
-from sad_nns.experiments.north_and_edl import config
 
 def random_regression(
     param_mean=[500, 100, 0.1, 5, 0, 0, 0.5, 0, 0.3, 0.3],
@@ -281,6 +280,7 @@ register(
 )
 
 from neurops import *
+from sad_nns.hpo import config
 
 class NORTH_RegressionEnv(gym.Env):
     _max_epoch = 1024
@@ -406,23 +406,21 @@ class NORTH_RegressionEnv(gym.Env):
         self.Y_valid = torch.Tensor(Y_valid)#.to(self.device)
         self.X_test = torch.Tensor(X_test)#.to(self.device)
         self.Y_test = torch.Tensor(Y_test)#.to(self.device)
-
         
-
         num_layers = np.random.randint(self._layers_range[0],self._layers_range[1])
         num_nodes = np.random.randint(self._nodes_range[0],self._nodes_range[1])
 
-        model_layers = []
+        model_layers = nn.ModuleList()
 
         in_features = self.dataset_shape[0]
         for i in range(num_layers):
             out_features = num_nodes
-            model_layers.append(ModLinear(in_features,out_features,masked=True, prebatchnorm=True, learnable_mask=True))
+            model_layers.append(ModLinear(in_features,out_features,))#masked=True, prebatchnorm=True, learnable_mask=True))
             in_features = out_features
         out_features = self.dataset_shape[1]
-        model_layers.append(ModLinear(in_features,out_features, masked=True, prebatchnorm=True, nonlinearity=""))
-        
-        self.model = ModSequential(*model_layers, track_activations=True,track_auxiliary_gradients=True).to(self.device)
+        model_layers.append(ModLinear(in_features,out_features, nonlinearity="",))# masked=True, prebatchnorm=True))
+        model_layers.to(self.device)
+        self.model = ModSequential(*model_layers, input_shape=(1,self.dataset_shape[0]), track_activations=False,).to(self.device)# track_auxiliary_gradients=True).to(self.device)
         torch.compile(self.model)
         
         self.optimizer = torch.optim.SGD(self.model.parameters(), lr=config.learning_rate)
@@ -430,8 +428,8 @@ class NORTH_RegressionEnv(gym.Env):
         self.max_size = sum(p.numel() for p in self.model.parameters() if p.requires_grad) * (1.5+np.random.random())
 
         self.model.eval()
-        train_loss = self.loss_fn(self.model(self.X_train).cpu(), self.Y_train).mean().item()
-        valid_loss = self.loss_fn(self.model(self.X_valid).cpu(), self.Y_valid).mean().item()
+        train_loss = self.loss_fn(self.model(self.X_train), self.Y_train).mean().item()
+        valid_loss = self.loss_fn(self.model(self.X_valid), self.Y_valid).mean().item()
 
         self.epoch = 0
         self.max_epoch = int(self._min_epoch + np.random.random()*(self._max_epoch-self._min_epoch))
@@ -498,10 +496,10 @@ class NORTH_RegressionEnv(gym.Env):
             to_prune = np.argsort(scores.detach().cpu().numpy())[:int(0.25*len(scores))]
 
             stats["num_pruned"] += len(to_prune)
-            print("Layer {} scores: mean {:.3g}, std {:.3g}, min {:.3g}, smallest 25%: {}".format(
-                i, scores.mean(), scores.std(), scores.min(), to_prune))
+            # print("Layer {} scores: mean {:.3g}, std {:.3g}, min {:.3g}, smallest 25%: {}".format(
+            #     i, scores.mean(), scores.std(), scores.min(), to_prune))
 
-            self.model.prune(i, to_prune, optimizer=self.optimizer, clear_activations=True)
+            self.model.prune(i, to_prune, optimizer=self.optimizer)#, clear_activations=True)
 
         # Add tensor_func back to metric_params for next loop
         metric_params['tensor'] = tensor_func
@@ -523,7 +521,7 @@ class NORTH_RegressionEnv(gym.Env):
             to_add = max(score - int(0.95 * max_rank), 0)
 
             stats["num_grown"] += to_add
-            print("Layer {} score: {}/{}, neurons to add: {}".format(i, score, max_rank, to_add))
+            # print("Layer {} score: {}/{}, neurons to add: {}".format(i, score, max_rank, to_add))
             self.model.grow(i, to_add, fanin_weights="iterative_orthogonalization", optimizer=self.optimizer)
 
         # Add tensor_func back to metric_params for next loop

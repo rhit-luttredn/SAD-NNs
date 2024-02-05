@@ -25,7 +25,7 @@ prune_metric = 'weight_sum'
 # IMPORTANT NOTE: `tensor` is a special config that must be set for each metric
 [north.metric_params]
 # One of 'activation' or 'weight'
-effective_rank.tensor = 'weight'
+effective_rank.tensor = 'activation'
 effective_rank.threshold = 0.01
 effective_rank.partial = false
 effective_rank.scale = true
