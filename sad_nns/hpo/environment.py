@@ -278,6 +278,7 @@ register(
     id='Regression_Env-v1',
     entry_point=__name__ + ':RegressionEnv'
 )
+##########################################################################################
 
 from neurops import *
 from sad_nns.hpo import config
@@ -372,7 +373,7 @@ class NORTH_RegressionEnv(gym.Env):
             "valid_samples": self.dataset_shape[3],
             # Base Model Features
             "layers": len([module for module in self.model.modules() if isinstance(module, nn.Linear)]),
-            "model_size": sum(p.numel() for p in self.model.parameters() if p.requires_grad),
+            "model_size": self.model.parameter_count(masked = False),
             "max_size": self.max_size,
             # Reward features
             "loss_importance": self.loss_importance,
@@ -420,12 +421,23 @@ class NORTH_RegressionEnv(gym.Env):
         out_features = self.dataset_shape[1]
         model_layers.append(ModLinear(in_features,out_features, nonlinearity="",))# masked=True, prebatchnorm=True))
         model_layers.to(self.device)
-        self.model = ModSequential(*model_layers, input_shape=(1,self.dataset_shape[0]), track_activations=False,).to(self.device)# track_auxiliary_gradients=True).to(self.device)
-        torch.compile(self.model)
+        self.model = ModSequential(*model_layers, input_shape=(1,self.dataset_shape[0]), track_activations=False, track_auxiliary_gradients=True).to(self.device)
+        # torch.compile(self.model)
         
         self.optimizer = torch.optim.SGD(self.model.parameters(), lr=config.learning_rate)
 
-        self.max_size = sum(p.numel() for p in self.model.parameters() if p.requires_grad) * (1.5+np.random.random())
+
+        self.activation = {}
+        def get_activation(name):
+            def hook(model, input, output):
+                self.activation[name] = output.detach()
+            return hook
+
+        # manual save of activation
+        for i in range(len(self.model)-1):
+            self.model[i].register_forward_hook(get_activation(str(i)))
+
+        self.max_size = self.model.parameter_count(masked = False) * (1.5+np.random.random())
 
         self.model.eval()
         train_loss = self.loss_fn(self.model(self.X_train), self.Y_train).mean().item()
@@ -439,7 +451,7 @@ class NORTH_RegressionEnv(gym.Env):
         self.size_importance = 1-self.loss_importance-self.budget_importance
 
 
-        self.prev_reward = self.reward_fn(valid_loss,sum(p.numel() for p in self.model.parameters() if p.requires_grad),0)
+        self.prev_reward = self.reward_fn(valid_loss,self.model.parameter_count(masked = False),0)
         self.initial_reward = self.prev_reward
         self.avg_reward = 0
         stats = {
@@ -455,12 +467,7 @@ class NORTH_RegressionEnv(gym.Env):
         # print(observation, info)
         return observation, info
 
-    def train(self,lr,batch_ratio):
-        self._set_lr(lr)
-
-        training_samples = self.dataset_shape[3]
-        batch_size = int(batch_ratio*training_samples)
-        batch_size = max(batch_size, 2) #changed to 2 because there seems to be some batch norm
+    def train(self,batch_size):
         perm = np.random.permutation(training_samples)
 
         self.epoch += 1
@@ -482,51 +489,17 @@ class NORTH_RegressionEnv(gym.Env):
         torch.set_grad_enabled(was_enabled)
         
     def prune(self,stats):
-        # TODO: enable these to be set by HYP-RL
-        prune_metric = config.prune_metric
-        metric_params = config.prune_metric_params
-        tensor_func = metric_params.pop('tensor')
+        # TODO
+        pass
 
-        stats["num_prunes"]=0
-
-        # Prune the model
+    def grow(self,batch_size, stats):
         for i in range(len(self.model)-1):
-            tensor = tensor_func(self.model, i)
-            scores = prune_metric(tensor, **metric_params)
-            to_prune = np.argsort(scores.detach().cpu().numpy())[:int(0.25*len(scores))]
-
-            stats["num_pruned"] += len(to_prune)
-            # print("Layer {} scores: mean {:.3g}, std {:.3g}, min {:.3g}, smallest 25%: {}".format(
-            #     i, scores.mean(), scores.std(), scores.min(), to_prune))
-
-            self.model.prune(i, to_prune, optimizer=self.optimizer)#, clear_activations=True)
-
-        # Add tensor_func back to metric_params for next loop
-        metric_params['tensor'] = tensor_func
-
-        return stats
-
-    def grow(self, stats):
-        grow_metric = config.grow_metric
-        metric_params = config.grow_metric_params
-        tensor_func = metric_params.pop('tensor')
-
-        stats["num_grown"] = 0
-
-        for i in range(len(self.model)-1):
-            tensor = tensor_func(self.model, i)
-            score = grow_metric(tensor, **metric_params)
-
             max_rank = self.model[i].width()
-            to_add = max(score - int(0.95 * max_rank), 0)
-
-            stats["num_grown"] += to_add
-            # print("Layer {} score: {}/{}, neurons to add: {}".format(i, score, max_rank, to_add))
-            self.model.grow(i, to_add, fanin_weights="iterative_orthogonalization", optimizer=self.optimizer)
-
-        # Add tensor_func back to metric_params for next loop
-        metric_params['tensor'] = tensor_func
-
+            score = NORTH_score(self.activation[str(i)], batchsize=batch_size, threshold=epsilon)
+            
+            to_add = max(0, int(self.model[i].weight.size()[0] * (score - initScore)))
+            
+            self.model.grow(i,)
         return stats
     
     def step(self,action):
@@ -542,15 +515,21 @@ class NORTH_RegressionEnv(gym.Env):
             "train_loss":0,
             "valid_loss":0
         }
+        self._set_lr(lr)
+
+        training_samples = self.dataset_shape[3]
+        batch_size = int(batch_ratio*training_samples)
+        batch_size = max(batch_size, 2) #changed to 2 because there seems to be some batch norm
+        
 
         if prune:
             self.prune(stats)
             
         if grow:
-            self.grow(stats)
+            self.grow(batch_size,stats)
 
         if train:
-            self.train(lr,batch_ratio)
+            self.train(batch_size)
 
         self.model.eval()
         Y_pred = self.model(self.X_train)
@@ -559,7 +538,7 @@ class NORTH_RegressionEnv(gym.Env):
         Y_pred = self.model(self.X_valid)
         valid_loss = self.loss_fn(Y_pred, self.Y_valid).mean().item()
 
-        base_reward = self.reward_fn(valid_loss,sum(p.numel() for p in self.model.parameters() if p.requires_grad),self.epoch)
+        base_reward = self.reward_fn(valid_loss,self.model.parameter_count(masked = False),self.epoch)
         self.avg_reward = (base_reward-self.prev_reward)*self.reward_beta+(1-self.reward_beta)*self.avg_reward
         self.prev_reward = base_reward
 
@@ -567,7 +546,7 @@ class NORTH_RegressionEnv(gym.Env):
         if stop or self.epoch >= self.max_epoch:
             Y_pred = self.model(self.X_test)
             test_loss = self.loss_fn(Y_pred, self.Y_test).mean().item()
-            self.avg_reward += self.reward_fn(test_loss,sum(p.numel() for p in self.model.parameters() if p.requires_grad),self.epoch)*self.reward_beta+(1-self.reward_beta)*self.avg_reward
+            self.avg_reward += self.reward_fn(test_loss,self.model.parameter_count(masked = False),self.epoch)*self.reward_beta+(1-self.reward_beta)*self.avg_reward
             done = True
             
         stats["train_loss"]=train_loss
