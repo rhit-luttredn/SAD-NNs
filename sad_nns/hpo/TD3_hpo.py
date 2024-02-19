@@ -1,5 +1,4 @@
-#!/usr/bin/env python3
-# docs and experiment results can be found at https://docs.cleanrl.dev/rl-algorithms/ddpg/#ddpg_continuous_actionpy
+# docs and experiment results can be found at https://docs.cleanrl.dev/rl-algorithms/td3/#td3_continuous_actionpy
 import os
 import random
 import time
@@ -25,7 +24,6 @@ class EnvArgs:
     # To be computed at runtime
     device = None
 
-
 @dataclass
 class Args:
     exp_name: str = os.path.basename(__file__)[: -len(".py")]
@@ -46,11 +44,15 @@ class Args:
     """whether to capture videos of the agent performances (check out `videos` folder)"""
     save_model: bool = False
     """whether to save model into the `runs/{run_name}` folder"""
+    upload_model: bool = False
+    """whether to upload the saved model to huggingface"""
+    hf_entity: str = ""
+    """the user or org name of the model repository from the Hugging Face Hub"""
 
     # Algorithm specific arguments
     env_id: str = "RegressionEnv-v0"
-    """the environment id of the Atari game"""
-    total_timesteps: int = 50_000
+    """the id of the environment"""
+    total_timesteps: int = 10_000
     """total timesteps of the experiments"""
     learning_rate: float = 3e-4
     """the learning rate of the optimizer"""
@@ -62,9 +64,11 @@ class Args:
     """target smoothing coefficient (default: 0.005)"""
     batch_size: int = 256
     """the batch size of sample from the reply memory"""
-    exploration_noise: float = 0.1 #this could also be an issue
+    policy_noise: float = 0.2
+    """the scale of policy noise"""
+    exploration_noise: float = 0.1
     """the scale of exploration noise"""
-    learning_starts: int = 5000
+    learning_starts: int = 250#25e3
     """timestep to start learning"""
     policy_frequency: int = 2
     """the frequency of training policy (delayed)"""
@@ -79,7 +83,6 @@ def make_env(env_id, seed, idx, capture_video, run_name, env_kwargs: dict = {}):
             env = gym.wrappers.RecordVideo(env, f"videos/{run_name}")
         else:
             env = gym.make(env_id, **env_kwargs)
-        env = gym.wrappers.FlattenObservation(env)
         env = gym.wrappers.RecordEpisodeStatistics(env)
         env.action_space.seed(seed)
         return env
@@ -100,8 +103,8 @@ class QNetwork(nn.Module):
         x = F.relu(self.fc1(x))
         x = F.relu(self.fc2(x))
         x = self.fc3(x)
-        x = F.tanh(x)*2.5 # Trying to normalize the Q value. This is only even slightly valid due to our definition of the reward function.
         return x
+
 
 class Actor(nn.Module):
     def __init__(self, env):
@@ -133,6 +136,7 @@ if __name__ == "__main__":
 poetry run pip install "stable_baselines3==2.0.0a1"
 """
         )
+
     args = tyro.cli(Args)
     env_args = vars(EnvArgs())
     run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
@@ -169,11 +173,14 @@ poetry run pip install "stable_baselines3==2.0.0a1"
 
     actor = Actor(envs).to(device)
     qf1 = QNetwork(envs).to(device)
+    qf2 = QNetwork(envs).to(device)
     qf1_target = QNetwork(envs).to(device)
+    qf2_target = QNetwork(envs).to(device)
     target_actor = Actor(envs).to(device)
     target_actor.load_state_dict(actor.state_dict())
     qf1_target.load_state_dict(qf1.state_dict())
-    q_optimizer = optim.Adam(list(qf1.parameters()), lr=args.learning_rate)
+    qf2_target.load_state_dict(qf2.state_dict())
+    q_optimizer = optim.Adam(list(qf1.parameters()) + list(qf2.parameters()), lr=args.learning_rate)
     actor_optimizer = optim.Adam(list(actor.parameters()), lr=args.learning_rate)
 
     envs.single_observation_space.dtype = np.float32
@@ -223,27 +230,36 @@ poetry run pip install "stable_baselines3==2.0.0a1"
         if global_step > args.learning_starts:
             data = rb.sample(args.batch_size)
             with torch.no_grad():
-                next_state_actions = target_actor(data.next_observations)
+                clipped_noise = (torch.randn_like(data.actions, device=device) * args.policy_noise).clamp(
+                    -args.noise_clip, args.noise_clip
+                ) * target_actor.action_scale
+
+                next_state_actions = (target_actor(data.next_observations) + clipped_noise).clamp(
+                    envs.single_action_space.low[0], envs.single_action_space.high[0]
+                )
                 qf1_next_target = qf1_target(data.next_observations, next_state_actions)
-                next_q_value = data.rewards.flatten() + (1 - data.dones.flatten()) * args.gamma * (qf1_next_target).view(-1)
+                qf2_next_target = qf2_target(data.next_observations, next_state_actions)
+                min_qf_next_target = torch.min(qf1_next_target, qf2_next_target)
+                next_q_value = data.rewards.flatten() + (1 - data.dones.flatten()) * args.gamma * (min_qf_next_target).view(-1)
 
             qf1_a_values = qf1(data.observations, data.actions).view(-1)
-            # print(qf1_a_values,next_q_value)
+            qf2_a_values = qf2(data.observations, data.actions).view(-1)
             qf1_loss = F.mse_loss(qf1_a_values, next_q_value)
             if np.isinf(qf1_loss.cpu().detach().numpy()).any():
                 qf1_loss = F.l1_loss(qf1_a_values, next_q_value)
-                ## This worked for a bit but I think the gradients are exploding
-                ## May need to use TD3 instead
-            # print(qf1_loss)
+            qf2_loss = F.mse_loss(qf2_a_values, next_q_value)
+            if np.isinf(qf2_loss.cpu().detach().numpy()).any():
+                qf2_loss = F.l1_loss(qf1_a_values, next_q_value)
+            qf_loss = qf1_loss + qf2_loss
+
             # optimize the model
             q_optimizer.zero_grad()
-            qf1_loss.backward()
+            qf_loss.backward()
             q_optimizer.step()
 
             if global_step % args.policy_frequency == 0:
                 actor_loss = -qf1(data.observations, actor(data.observations)).mean()
                 actor_optimizer.zero_grad()
-                # print(actor_loss)
                 actor_loss.backward()
                 actor_optimizer.step()
 
@@ -252,19 +268,24 @@ poetry run pip install "stable_baselines3==2.0.0a1"
                     target_param.data.copy_(args.tau * param.data + (1 - args.tau) * target_param.data)
                 for param, target_param in zip(qf1.parameters(), qf1_target.parameters()):
                     target_param.data.copy_(args.tau * param.data + (1 - args.tau) * target_param.data)
+                for param, target_param in zip(qf2.parameters(), qf2_target.parameters()):
+                    target_param.data.copy_(args.tau * param.data + (1 - args.tau) * target_param.data)
 
             if global_step % 100 == 0:
                 writer.add_scalar("losses/qf1_values", qf1_a_values.mean().item(), global_step)
+                writer.add_scalar("losses/qf2_values", qf2_a_values.mean().item(), global_step)
                 writer.add_scalar("losses/qf1_loss", qf1_loss.item(), global_step)
+                writer.add_scalar("losses/qf2_loss", qf2_loss.item(), global_step)
+                writer.add_scalar("losses/qf_loss", qf_loss.item() / 2.0, global_step)
                 writer.add_scalar("losses/actor_loss", actor_loss.item(), global_step)
                 print("SPS:", int(global_step / (time.time() - start_time)))
                 writer.add_scalar("charts/SPS", int(global_step / (time.time() - start_time)), global_step)
 
     if args.save_model:
         model_path = f"runs/{run_name}/{args.exp_name}.cleanrl_model"
-        torch.save((actor.state_dict(), qf1.state_dict()), model_path)
+        torch.save((actor.state_dict(), qf1.state_dict(), qf2.state_dict()), model_path)
         print(f"model saved to {model_path}")
-        from sad_nns.utils.cleanrl.evals.ddpg_eval import evaluate
+        from sad_nns.utils.cleanrl.evals.td3_eval import evaluate
 
         episodic_returns = evaluate(
             model_path,
@@ -275,10 +296,16 @@ poetry run pip install "stable_baselines3==2.0.0a1"
             Model=(Actor, QNetwork),
             device=device,
             exploration_noise=args.exploration_noise,
-            env_kwargs=env_args,
         )
         for idx, episodic_return in enumerate(episodic_returns):
             writer.add_scalar("eval/episodic_return", episodic_return, idx)
+
+        # if args.upload_model:
+        #     from sad_nns.utils.cleanrl.huggingface import push_to_hub
+
+        #     repo_name = f"{args.env_id}-{args.exp_name}-seed{args.seed}"
+        #     repo_id = f"{args.hf_entity}/{repo_name}" if args.hf_entity else repo_name
+        #     push_to_hub(args, episodic_returns, repo_id, "TD3", f"runs/{run_name}", f"videos/{run_name}-eval")
 
     envs.close()
     writer.close()
