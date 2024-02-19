@@ -142,6 +142,7 @@ class Agent(nn.Module):
         height = envs.single_observation_space.shape[0]
         width = envs.single_observation_space.shape[1]
         n_input_channels = envs.single_observation_space.shape[2]
+        self.dropout_layers = []
 
         conv_layers = nn.Sequential(
             layer_init(nn.Conv2d(n_input_channels, 16, 2, padding=1)),
@@ -157,15 +158,27 @@ class Agent(nn.Module):
         output = conv_layers(dummy_input)
         output_size = output.shape[1] * output.shape[2] * output.shape[3]
 
-        self.network = nn.Sequential(
+        self.network = nn.Sequential( 
             conv_layers,
             nn.Flatten(),
             nn.Linear(output_size, 512),
             nn.ReLU(),
+            self._make_dropout(0.5),
+            nn.Linear(512, 512),
+            nn.ReLU(),
+            self._make_dropout(0.5),
+            nn.Linear(512, 512),
+            nn.ReLU(),
+            self._make_dropout(0.5),
         )
 
         self.actor = layer_init(nn.Linear(512, envs.single_action_space.n), std=0.01)
         self.critic = layer_init(nn.Linear(512, 1), std=1)
+    
+    def _make_dropout(self, p: float):
+        dropout = nn.Dropout(p)
+        self.dropout_layers.append(dropout)
+        return dropout
 
     def get_value(self, x):
         x = x.permute(0, 3, 1, 2)
@@ -179,6 +192,86 @@ class Agent(nn.Module):
         if action is None:
             action = probs.sample()
         return action, probs.log_prob(action), probs.entropy(), self.critic(hidden)
+
+    def enable_dropout(self):
+        for layer in self.dropout_layers:
+            layer.train()
+    
+    def disable_dropout(self):
+        for layer in self.dropout_layers:
+            layer.eval()
+
+
+def get_monte_carlo_predictions(envs: VectorEnv, agent: Agent, forward_passes: int, eval_episodes: int, device: torch.device = 1):
+    """ Function to get the monte-carlo samples and uncertainty estimates
+    through multiple forward passes
+
+    Parameters
+    ----------
+    envs : VectorEnv
+        vectorized environment
+    model : Agent
+        model to be used for prediction
+    forward_passes : int
+        number of monte-carlo samples/forward passes
+    eval_episodes : int
+        number of episodes to evaluate the model
+    device : torch.device
+        device to be used for computation
+    """
+    n_samples = envs.num_envs
+    n_classes = envs.single_action_space.n
+
+    dropout_predictions = np.empty((0, n_samples, n_classes))
+    softmax = nn.Softmax(dim=1)
+    # for i in range(forward_passes):
+    #     predictions = np.empty((0, n_classes))
+    #     agent.eval()
+    #     agent.enable_dropout()
+    #     for i, (image, label) in enumerate(data_loader):
+    #         image = image.to(torch.device('cuda'))
+    #         with torch.no_grad():
+    #             output = agent(image)
+    #             output = softmax(output)  # shape (n_samples, n_classes)
+    #         predictions = np.vstack((predictions, output.cpu().numpy()))
+
+    #     dropout_predictions = np.vstack((dropout_predictions,
+    #                                      predictions[np.newaxis, :, :]))
+    #     # dropout predictions - shape (forward_passes, n_samples, n_classes)
+
+    agent.eval()
+    obs, _ = envs.reset()
+    
+    # MC Dropout
+    agent.enable_dropout()
+    for i in range(forward_passes):
+        actions, _, _, _ = agent.get_action_and_value(torch.Tensor(obs).to(device))
+
+
+    agent.disable_dropout()
+    actions, _, _, _ = agent.get_action_and_value(torch.Tensor(obs).to(device))
+    next_obs, _, _, _, infos = envs.step(actions.cpu().numpy())
+    if "final_info" in infos:
+        for info in infos["final_info"]:
+            if "episode" not in info:
+                continue
+            print(f"eval_episode={len(episodic_returns)}, episodic_return={info['episode']['r']}")
+            episodic_returns += [info["episode"]["r"]]
+    obs = next_obs
+
+    # Calculating mean across multiple MCD forward passes 
+    mean = np.mean(dropout_predictions, axis=0)  # shape (n_samples, n_classes)
+
+    # Calculating variance across multiple MCD forward passes
+    variance = np.var(dropout_predictions, axis=0)  # shape (n_samples, n_classes)
+
+    epsilon = sys.float_info.min
+    # Calculating entropy across multiple MCD forward passes
+    entropy = -np.sum(mean * np.log(mean + epsilon), axis=-1)  # shape (n_samples,)
+
+    # Calculating mutual information across multiple MCD forward passes 
+    mutual_info = entropy - np.mean(np.sum(-dropout_predictions * np.log(dropout_predictions + epsilon),
+                                           axis=-1), axis=0)  # shape (n_samples,)
 
 
 if __name__ == "__main__":
