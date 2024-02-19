@@ -227,9 +227,13 @@ poetry run pip install "stable_baselines3==2.0.0a1"
                 next_q_value = data.rewards.flatten() + (1 - data.dones.flatten()) * args.gamma * (qf1_next_target).view(-1)
 
             qf1_a_values = qf1(data.observations, data.actions).view(-1)
-            print(qf1_a_values,next_q_value)
+            # print(qf1_a_values,next_q_value)
             qf1_loss = F.mse_loss(qf1_a_values, next_q_value)
-            print(qf1_loss)
+            if np.isinf(qf1_loss.cpu().detach().numpy()).any():
+                qf1_loss = F.l1_loss(qf1_a_values, next_q_value)
+                ## This worked for a bit but I think the gradients are exploding
+                ## May need to use TD3 instead
+            # print(qf1_loss)
             # optimize the model
             q_optimizer.zero_grad()
             qf1_loss.backward()
