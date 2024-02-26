@@ -10,6 +10,7 @@ from itertools import product
 
 import gymnasium as gym
 import numpy as np
+import pandas as pd
 import sad_nns.envs
 import torch
 import torch.nn as nn
@@ -42,11 +43,11 @@ class Args:
     """the wandb's project name"""
     wandb_entity: str = None
     """the entity (team) of wandb's project"""
-    capture_video: bool = False
+    capture_video: bool = True
     """whether to capture videos of the agent performances (check out `videos` folder)"""
 
     # Algorithm specific arguments
-    env_id: str = "SimpleEnv-v0"
+    env_id: str = "MineFieldEnv-v0"
     """the id of the environment"""
     total_timesteps: int = 50_000
     """total timesteps of the experiments"""
@@ -84,17 +85,19 @@ class Args:
     # Experiment specific arguments
     output_features: int = 64
     """the number of output features for each model's feature extractor"""
-    conv_sizes: list = field(default_factory=lambda: [(8, 16), (16, 32)])
-    # conv_sizes: list = field(default_factory=lambda: [(8, 16, 32), (16, 32, 64), (32, 64, 128)])
+    # conv_sizes: list = field(default_factory=lambda: [(8, 16), (16, 32)])
+    conv_sizes: list = field(default_factory=lambda: [(8, 16, 32), (16, 32, 64), (32, 64, 128)])
     """the possible output channels for the each convolutional layers. Each tuple is a set for one layer"""
-    # linear_sizes: list = field(default_factory=lambda: [[64], [64], [64]])
-    linear_sizes: list = field(default_factory=lambda: [64])
+    linear_sizes: list = field(default_factory=lambda: [[64], [64], [64]])
+    # linear_sizes: list = field(default_factory=lambda: [64])
     # linear_sizes: list = field(default_factory=lambda: [64, 128, 256])
     """the possible output sizes for the each linear layers. Each tuple is a set for one layer"""
 
     # Environment specific arguments
     env_size: int = 10
     """the size of the environment"""
+    wall_density: float = 0.5
+    use_lava: bool = False
 
     # to be filled in runtime
     batch_size: int = 0
@@ -133,100 +136,100 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
     return layer
 
 
-class Agent(nn.Module):
-    def __init__(self, envs: VectorEnv, network = None, network_output_size: int = 512):
-        super().__init__()
-        if (network is not None) != (network_output_size is not None):
-            raise ValueError("Please provide both `network` and `network_output_size` or none of them.")
+# class Agent(nn.Module):
+#     def __init__(self, envs: VectorEnv, network = None, network_output_size: int = 512):
+#         super().__init__()
+#         if (network is not None) != (network_output_size is not None):
+#             raise ValueError("Please provide both `network` and `network_output_size` or none of them.")
 
-        if network is not None:
-            height = envs.single_observation_space.shape[0]
-            width = envs.single_observation_space.shape[1]
-            n_input_channels = envs.single_observation_space.shape[2]
+#         if network is None:
+#             height = envs.single_observation_space.shape[0]
+#             width = envs.single_observation_space.shape[1]
+#             n_input_channels = envs.single_observation_space.shape[2]
 
-            conv_layers = nn.Sequential(
-                layer_init(nn.Conv2d(n_input_channels, 16, 2, padding=1)),
-                nn.ReLU(),
-                layer_init(nn.Conv2d(16, 32, 2, padding=1)),
-                nn.ReLU(),
-                layer_init(nn.Conv2d(32, 64, 2, padding=1)),
-                nn.ReLU(),
-            )
+#             conv_layers = nn.Sequential(
+#                 layer_init(nn.Conv2d(n_input_channels, 16, 2, padding=1)),
+#                 nn.ReLU(),
+#                 layer_init(nn.Conv2d(16, 32, 2, padding=1)),
+#                 nn.ReLU(),
+#                 layer_init(nn.Conv2d(32, 64, 2, padding=1)),
+#                 nn.ReLU(),
+#             )
 
-            # Calculate the size of the output of the conv_layers by doing one forward pass
-            dummy_input = torch.randn(1, n_input_channels, height, width)
-            output = conv_layers(dummy_input)
-            output_size = output.shape[1] * output.shape[2] * output.shape[3]
+#             # Calculate the size of the output of the conv_layers by doing one forward pass
+#             dummy_input = torch.randn(1, n_input_channels, height, width)
+#             output = conv_layers(dummy_input)
+#             output_size = output.shape[1] * output.shape[2] * output.shape[3]
 
-            self.network = nn.Sequential(
-                conv_layers,
-                nn.Flatten(),
-                nn.Linear(output_size, 512),
-                nn.ReLU(),
-            )
+#             self.network = nn.Sequential(
+#                 conv_layers,
+#                 nn.Flatten(),
+#                 nn.Linear(output_size, 512),
+#                 nn.ReLU(),
+#             )
 
-            self.actor = layer_init(nn.Linear(512, envs.single_action_space.n), std=0.01)
-            self.critic = layer_init(nn.Linear(512, 1), std=1)
-        else:
-            self.network = network
-            self.actor = layer_init(nn.Linear(network_output_size, envs.single_action_space.n), std=0.01)
-            self.critic = layer_init(nn.Linear(network_output_size, 1), std=1)
+#             self.actor = layer_init(nn.Linear(512, envs.single_action_space.n), std=0.01)
+#             self.critic = layer_init(nn.Linear(512, 1), std=1)
+#         else:
+#             self.network = network
+#             self.actor = layer_init(nn.Linear(network_output_size, envs.single_action_space.n), std=0.01)
+#             self.critic = layer_init(nn.Linear(network_output_size, 1), std=1)
 
-    def get_value(self, x):
-        x = x.permute(0, 3, 1, 2)
-        return self.critic(self.network(x / 255.0))
+#     def get_value(self, x):
+#         x = x.permute(0, 3, 1, 2)
+#         return self.critic(self.network(x / 255.0))
 
-    def get_action_and_value(self, x, action=None):
-        x = x.permute(0, 3, 1, 2)
-        hidden = self.network(x / 255.0)
-        logits = self.actor(hidden)
-        probs = Categorical(logits=logits)
-        if action is None:
-            action = probs.sample()
-        return action, probs.log_prob(action), probs.entropy(), self.critic(hidden)
+#     def get_action_and_value(self, x, action=None):
+#         x = x.permute(0, 3, 1, 2)
+#         hidden = self.network(x / 255.0)
+#         logits = self.actor(hidden)
+#         probs = Categorical(logits=logits)
+#         if action is None:
+#             action = probs.sample()
+#         return action, probs.log_prob(action), probs.entropy(), self.critic(hidden)
 
 
 def count_parameters(model: nn.Module):
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
 
-def generate_fixed_structure_models(input_channels, output_features, possible_conv_sizes, possible_linear_sizes):
-    models = []
-    # TODO: Implement using multiple linear layers
-    # Generate all possible combinations of intermediate layers
-    for conv_sizes in product(*possible_conv_sizes):
-        for linear_size in possible_linear_sizes:
-            # Check if the total number of neurons does not exceed the maximum
-            total_neurons = sum(conv_sizes) + linear_size 
+# def generate_fixed_structure_models(input_channels, output_features, possible_conv_sizes, possible_linear_sizes):
+#     models = []
+#     # TODO: Implement using multiple linear layers
+#     # Generate all possible combinations of intermediate layers
+#     for conv_sizes in product(*possible_conv_sizes):
+#         for linear_size in possible_linear_sizes:
+#             # Check if the total number of neurons does not exceed the maximum
+#             total_neurons = sum(conv_sizes) + linear_size 
 
-            layers = []
+#             layers = []
 
-            # Add convolutional layers
-            in_channels = input_channels
-            for out_channels in conv_sizes:
-                layers.append(layer_init(nn.Conv2d(in_channels, out_channels, kernel_size=(2, 2))))
-                layers.append(nn.ReLU())
-                in_channels = out_channels
+#             # Add convolutional layers
+#             in_channels = input_channels
+#             for out_channels in conv_sizes:
+#                 layers.append(layer_init(nn.Conv2d(in_channels, out_channels, kernel_size=(2, 2))))
+#                 layers.append(nn.ReLU())
+#                 in_channels = out_channels
 
-            # Flatten the output of the last conv layer
-            layers.append(nn.Flatten())
+#             # Flatten the output of the last conv layer
+#             layers.append(nn.Flatten())
 
-            # Add the two linear layers
-            in_features = in_channels * 16
-            layers.append(layer_init(nn.Linear(in_features, linear_size)))
+#             # Add the two linear layers
+#             in_features = in_channels * 16
+#             layers.append(layer_init(nn.Linear(in_features, linear_size)))
 
-            # Add the final output layer
-            layers.append(nn.Linear(linear_size, output_features))
+#             # Add the final output layer
+#             layers.append(nn.Linear(linear_size, output_features))
 
-            model = nn.Sequential(*layers)
+#             model = nn.Sequential(*layers)
             
-            total_params = count_parameters(model)
+#             total_params = count_parameters(model)
 
-            neuron_log.append(total_neurons)
-            parameter_log.append(total_params)
-            models.append(model)
+#             neuron_log.append(total_neurons)
+#             parameter_log.append(total_params)
+#             models.append(model)
 
-    return models
+#     return models
 
 
 def train_single_model(agent, optimizer, envs: VectorEnv, writer: SummaryWriter, args: Args):
@@ -379,7 +382,11 @@ def main():
     args.batch_size = int(args.num_envs * args.num_steps)
     args.minibatch_size = int(args.batch_size // args.num_minibatches)
     args.num_iterations = args.total_timesteps // args.batch_size
-    args.env_kwargs = {"size": args.env_size}
+    args.env_kwargs = {
+        "size": args.env_size,
+        "wall_density": args.wall_density,
+        "use_lava": args.use_lava,
+    }
     run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
     if args.track:
         import wandb
@@ -409,41 +416,52 @@ def main():
     )
     assert isinstance(envs.single_action_space, gym.spaces.Discrete), "only discrete action space is supported"
 
-    n_input_channels = envs.single_observation_space.shape[2]
-    architectures = generate_fixed_structure_models(
-        n_input_channels,
-        args.output_features,
-        args.conv_sizes,
-        args.linear_sizes,
-    )
+    # n_input_channels = envs.single_observation_space.shape[2]
+    # architectures = generate_fixed_structure_models(
+    #     n_input_channels,
+    #     args.output_features,
+    #     args.conv_sizes,
+    #     args.linear_sizes,
+    # )
+
+    df = pd.DataFrame(
+        columns=[
+            "# Total Parameters", 
+            "# Total Neurons", 
+            "Model Summary", 
+            "Environment", 
+            "Wall Density",
+            "Use Lava",
+            "Average Test Reward", 
+        ])
 
     # Generate all possible combinations of architectures
-    # arch_params = [args.conv_sizes, args.linear_sizes]
-    # architectures = list(product(*[product(*x) for x in arch_params]))
+    arch_params = [args.conv_sizes, args.linear_sizes]
+    architectures = list(product(*[product(*x) for x in arch_params]))
 
     # Iterate through each architecture
     start_time = time.time()
     model_rewards = []
-    # for i, (conv_sizes, linear_sizes) in enumerate(architectures):
-    for i, model in enumerate(architectures):
+    for i, (conv_sizes, linear_sizes) in enumerate(architectures):
+    # for i, model in enumerate(architectures):
         print(f'Iteration {i}/{len(architectures) - 1}')
-        # model_kwargs = {
-        #     "conv_sizes": conv_sizes,
-        #     "linear_sizes": linear_sizes,
-        #     "out_features": args.output_features,
-        # }
         model_kwargs = {
-            "network": model,
-            "network_output_size": args.output_features,
+            "conv_sizes": conv_sizes,
+            "linear_sizes": linear_sizes,
+            "out_features": args.output_features,
         }
+        # model_kwargs = {
+        #     "network": model,
+        #     "network_output_size": args.output_features,
+        # }
         
         # print(model_kwargs)
-        agent = Agent(envs, **model_kwargs).to(device)
+        agent = PPOAgent(envs, **model_kwargs).to(device)
         optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
 
         print(agent.network)
-        parameter_log[i] = count_parameters(agent.network)
-        neuron_log[i] = sum(p.numel() for p in agent.network.parameters() if p.requires_grad)
+        parameter_log.append(count_parameters(agent.network))
+        neuron_log.append(sum(p.numel() for p in agent.network.parameters() if p.requires_grad))
 
         print("Training...")
         writer = SummaryWriter(f"../runs/{run_name}/model-{i}")
@@ -466,9 +484,9 @@ def main():
             args.env_id,
             eval_episodes=10,
             run_name=f"{run_name}-eval",
-            Model=Agent,
+            Model=PPOAgent,
             device=device,
-            capture_video=False,
+            capture_video=True,
             env_kwargs=args.env_kwargs,
             model_kwargs=model_kwargs,
         )
@@ -478,34 +496,46 @@ def main():
         
         writer.close()
 
+        df.loc[len(df.index)] = {
+            "# Total Parameters": parameter_log[i],
+            "# Total Neurons": neuron_log[i],
+            "Model Summary": str(agent.network),
+            "Environment": args.env_id,
+            "Wall Density": args.wall_density,
+            "Use Lava": args.use_lava,
+            "Average Test Reward": np.mean(episodic_returns),
+        }
+
     envs.close()
 
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(20, 6))
+    df.to_csv(f"../runs/{run_name}/results.csv", index=False)
 
-    x1 = parameter_log
-    y = [np.mean(sub_array) for sub_array in model_rewards]
+    # fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(20, 6))
 
-    # Creating a scatter plot
-    ax1.scatter(x1, y)
-    ax1.set_xlabel('# Total Parameters')
-    ax1.set_ylabel('Average Training Reward')
-    ax1.set_title('Parameter Impact')
-    ax1.grid(True)
+    # x1 = parameter_log
+    # y = [np.mean(sub_array) for sub_array in model_rewards]
 
-    x2 = neuron_log
+    # # Creating a scatter plot
+    # ax1.scatter(x1, y)
+    # ax1.set_xlabel('# Total Parameters')
+    # ax1.set_ylabel('Average Training Reward')
+    # ax1.set_title('Parameter Impact')
+    # ax1.grid(True)
 
-    # Creating a scatter plot
-    ax2.scatter(x2, y)
-    ax2.set_xlabel('# Total Neurons')
-    ax2.set_ylabel('Average Training Reward')
-    ax2.set_title('Neuron Impact')
-    ax2.grid(True)
+    # x2 = neuron_log
 
-    plt.show()
+    # # Creating a scatter plot
+    # ax2.scatter(x2, y)
+    # ax2.set_xlabel('# Total Neurons')
+    # ax2.set_ylabel('Average Training Reward')
+    # ax2.set_title('Neuron Impact')
+    # ax2.grid(True)
 
-    end_time = time.time()
-    total_time = end_time - start_time
-    print("Total time to run file: {} seconds".format(total_time))
+    # plt.show()
+
+    # end_time = time.time()
+    # total_time = end_time - start_time
+    # print("Total time to run file: {} seconds".format(total_time))
 
 
 if __name__ == "__main__":
