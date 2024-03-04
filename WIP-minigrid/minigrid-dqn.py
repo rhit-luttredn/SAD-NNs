@@ -1,6 +1,7 @@
 # docs and experiment results can be found at https://docs.cleanrl.dev/rl-algorithms/ppo/#ppopy
 import os
 import random
+import sys
 import time
 from dataclasses import dataclass
 
@@ -188,69 +189,57 @@ def get_monte_carlo_predictions(envs: VectorEnv, agent: QNetwork, forward_passes
     device : torch.device
         device to be used for computation
     """
-    n_samples = envs.num_envs
+    num_envs = envs.num_envs
     n_classes = envs.single_action_space.n
 
-    dropout_predictions = np.empty((0, n_samples, n_classes))
+    dropout_predictions = np.empty((0, num_envs, n_classes))
     softmax = nn.Softmax(dim=1)
 
     agent.eval()
     obs, _ = envs.reset()
     epsilon = 1
 
-    episodic_returns = []
-    while len(episodic_returns) < eval_episodes:
-        if random.random() < epsilon:
-            actions = np.array([envs.single_action_space.sample() for _ in range(envs.num_envs)])
-        else:
-            q_values = agent(torch.Tensor(obs).to(device))
-            actions = torch.argmax(q_values, dim=1).cpu().numpy()
+    mutual_infos = []
+    variances = []
+    episode_count = 0
+    while episode_count < eval_episodes:
+        # MC Dropout
+        agent.enable_dropout()
+        dropout_vals = [agent(torch.Tensor(obs).to(device)) for _ in range(forward_passes)]
+        dropout_vals = np.array([softmax(vals).cpu().detach().numpy() for vals in dropout_vals])  # shape (num_envs, n_classes)
+
+        mean = np.mean(dropout_predictions, axis=0)  # shape (num_envs, n_classes)
+        variance = np.var(dropout_predictions, axis=0)  # shape (num_envs, n_classes)
+        variances.append(np.mean(variance, axis=0))
+
+        epsilon = sys.float_info.min
+        entropy = -np.sum(mean * np.log(mean + epsilon), axis=-1)  # shape (num_envs,)
+        mutual_info = entropy - np.mean(np.sum(-dropout_predictions * np.log(dropout_predictions + epsilon), axis=-1), axis=0)  # shape (num_envs,)
+        mutual_infos.append(np.mean(mutual_info))
+
+        agent.disable_dropout()
+        q_values = agent(torch.Tensor(obs).to(device))
+        actions = torch.argmax(q_values, dim=1).cpu().numpy()
         next_obs, _, _, _, infos = envs.step(actions)
         if "final_info" in infos:
             for info in infos["final_info"]:
                 if "episode" not in info:
                     continue
-                print(f"eval_episode={len(episodic_returns)}, episodic_return={info['episode']['r']}")
-                episodic_returns += [info["episode"]["r"]]
+                episode_count += 1
+                # print(f"eval_episode={len(episodic_returns)}, episodic_return={info['episode']['r']}")
+                # episodic_returns += [info["episode"]["r"]]
         obs = next_obs
+    
+    # Aggregate the results
+    mutual_infos = np.array(mutual_infos)  # shape (eval_episodes)
+    mutual_info = np.mean(mutual_infos)
+    variances = np.array(variances)  # shape (eval_episodes, n_classes)
+    variance = np.mean(variances, axis=0)  # shape (n_classes,)
 
-    obs, _ = envs.reset()
+    print("Mutual Information:", mutual_info)
+    print("Variance:", variance)
 
-    # MC Dropout
-    agent.enable_dropout()
-    for i in range(forward_passes):
-        q_values = agent(torch.Tensor(obs).to(device))
-        # actions, log_probs, entropy, _ = agent.get_action_and_value(torch.Tensor(obs).to(device))
-
-    # Get class variance
-    dropout_predictions = np.append(dropout_predictions, softmax(q_values).cpu().detach().numpy().reshape(1, n_samples, n_classes), axis=0)
-
-
-    agent.disable_dropout()
-    q_values = agent(torch.Tensor(obs).to(device))
-    actions = torch.argmax(q_values, dim=1).cpu().numpy()
-    next_obs, _, _, _, infos = envs.step(actions.cpu().numpy())
-    if "final_info" in infos:
-        for info in infos["final_info"]:
-            if "episode" not in info:
-                continue
-            print(f"eval_episode={len(episodic_returns)}, episodic_return={info['episode']['r']}")
-            episodic_returns += [info["episode"]["r"]]
-    obs = next_obs
-
-    # Calculating mean across multiple MCD forward passes 
-    mean = np.mean(dropout_predictions, axis=0)  # shape (n_samples, n_classes)
-
-    # Calculating variance across multiple MCD forward passes
-    variance = np.var(dropout_predictions, axis=0)  # shape (n_samples, n_classes)
-
-    epsilon = sys.float_info.min
-    # Calculating entropy across multiple MCD forward passes
-    entropy = -np.sum(mean * np.log(mean + epsilon), axis=-1)  # shape (n_samples,)
-
-    # Calculating mutual information across multiple MCD forward passes 
-    mutual_info = entropy - np.mean(np.sum(-dropout_predictions * np.log(dropout_predictions + epsilon),
-                                           axis=-1), axis=0)  # shape (n_samples,)
+    return mutual_info, variance
 
 
 if __name__ == "__main__":
