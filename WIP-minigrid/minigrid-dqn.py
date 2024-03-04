@@ -19,6 +19,34 @@ from torch.utils.tensorboard import SummaryWriter
 
 
 @dataclass
+class EnvArgs:
+    size: int|None = 10
+    """the height and width of the environment"""
+    width: int|None = None
+    """the width of the environment"""
+    height: int|None = None
+    """the height of the environment"""
+    agent_start_pos: tuple|None = None
+    """the starting position of the agent"""
+    agent_start_dir: int = 0
+    """the starting direction of the agent"""
+    max_steps: int|None = None
+    """the maximum number of steps before the environment is terminated"""
+    see_through_walls: bool = True
+    """whether the agent can see through walls"""
+
+    wall_density: int = 0.5
+    use_lava: bool = False
+
+    # wall_freq: int = 2
+    # """FOR HARDWALL: the number of tiles between walls"""
+    # use_lava: bool = False
+    # """FOR HARDWALL: whether to use lava"""
+    # lock_doors: bool = False
+    # """FOR HARDWALL: whether to lock doors"""
+
+
+@dataclass
 class Args:
     exp_name: str = os.path.basename(__file__)[: -len(".py")]
     """the name of this experiment"""
@@ -40,7 +68,7 @@ class Args:
     """whether to save model into the `runs/{run_name}` folder"""
 
     # Environment specific arguments
-    env_size: int = 10
+    # env_size: int = 10
 
     # Algorithm specific arguments
     env_id: str = "SimpleEnv-v0"
@@ -72,12 +100,8 @@ class Args:
     train_frequency: int = 4
     """the frequency of training"""
 
-    # to be filled in runtime
-    env_kwargs: dict = None
-    """the additional kwargs to pass to the gym environment (computed in runtime)"""
 
-
-def make_env(env_id, seed, idx, capture_video, run_name, env_kwargs: dict = {}):
+def make_env(env_id, idx, capture_video, run_name, env_kwargs: dict = {}):
     def thunk():
         if capture_video and idx == 0:
             env = gym.make(env_id, render_mode="rgb_array", **env_kwargs)
@@ -86,8 +110,6 @@ def make_env(env_id, seed, idx, capture_video, run_name, env_kwargs: dict = {}):
             env = gym.make(env_id, **env_kwargs)
         env = ImgObsWrapper(env)
         env = gym.wrappers.RecordEpisodeStatistics(env)
-
-        env.action_space.seed(seed)
         return env
 
     return thunk
@@ -119,17 +141,116 @@ class QNetwork(nn.Module):
             nn.Flatten(),
             nn.Linear(output_size, 512),
             nn.ReLU(),
+            self._make_dropout(0.5),
+            nn.Linear(512, 512),
+            nn.ReLU(),
+            self._make_dropout(0.5),
             nn.Linear(512, envs.single_action_space.n),
         )
+    
+    def _make_dropout(self, p: float):
+        dropout = nn.Dropout(p)
+        self.dropout_layers.append(dropout)
+        return dropout
 
     def forward(self, x):
         x = x.permute(0, 3, 1, 2)
         return self.network(x / 255.0)
 
+    def enable_dropout(self):
+        for layer in self.dropout_layers:
+            layer.train()
+    
+    def disable_dropout(self):
+        for layer in self.dropout_layers:
+            layer.eval()
+
 
 def linear_schedule(start_e: float, end_e: float, duration: int, t: int):
     slope = (end_e - start_e) / duration
     return max(slope * t + start_e, end_e)
+
+
+def get_monte_carlo_predictions(envs: VectorEnv, agent: QNetwork, forward_passes: int, eval_episodes: int, device: torch.device = 1):
+    """ Function to get the monte-carlo samples and uncertainty estimates
+    through multiple forward passes
+
+    Parameters
+    ----------
+    envs : VectorEnv
+        vectorized environment
+    model : Agent
+        model to be used for prediction
+    forward_passes : int
+        number of monte-carlo samples/forward passes
+    eval_episodes : int
+        number of episodes to evaluate the model
+    device : torch.device
+        device to be used for computation
+    """
+    n_samples = envs.num_envs
+    n_classes = envs.single_action_space.n
+
+    dropout_predictions = np.empty((0, n_samples, n_classes))
+    softmax = nn.Softmax(dim=1)
+
+    agent.eval()
+    obs, _ = envs.reset()
+    epsilon = 1
+
+    episodic_returns = []
+    while len(episodic_returns) < eval_episodes:
+        if random.random() < epsilon:
+            actions = np.array([envs.single_action_space.sample() for _ in range(envs.num_envs)])
+        else:
+            q_values = agent(torch.Tensor(obs).to(device))
+            actions = torch.argmax(q_values, dim=1).cpu().numpy()
+        next_obs, _, _, _, infos = envs.step(actions)
+        if "final_info" in infos:
+            for info in infos["final_info"]:
+                if "episode" not in info:
+                    continue
+                print(f"eval_episode={len(episodic_returns)}, episodic_return={info['episode']['r']}")
+                episodic_returns += [info["episode"]["r"]]
+        obs = next_obs
+
+    obs, _ = envs.reset()
+
+    # MC Dropout
+    agent.enable_dropout()
+    for i in range(forward_passes):
+        q_values = agent(torch.Tensor(obs).to(device))
+        # actions, log_probs, entropy, _ = agent.get_action_and_value(torch.Tensor(obs).to(device))
+
+    # Get class variance
+    dropout_predictions = np.append(dropout_predictions, softmax(q_values).cpu().detach().numpy().reshape(1, n_samples, n_classes), axis=0)
+
+
+    agent.disable_dropout()
+    q_values = agent(torch.Tensor(obs).to(device))
+    actions = torch.argmax(q_values, dim=1).cpu().numpy()
+    next_obs, _, _, _, infos = envs.step(actions.cpu().numpy())
+    if "final_info" in infos:
+        for info in infos["final_info"]:
+            if "episode" not in info:
+                continue
+            print(f"eval_episode={len(episodic_returns)}, episodic_return={info['episode']['r']}")
+            episodic_returns += [info["episode"]["r"]]
+    obs = next_obs
+
+    # Calculating mean across multiple MCD forward passes 
+    mean = np.mean(dropout_predictions, axis=0)  # shape (n_samples, n_classes)
+
+    # Calculating variance across multiple MCD forward passes
+    variance = np.var(dropout_predictions, axis=0)  # shape (n_samples, n_classes)
+
+    epsilon = sys.float_info.min
+    # Calculating entropy across multiple MCD forward passes
+    entropy = -np.sum(mean * np.log(mean + epsilon), axis=-1)  # shape (n_samples,)
+
+    # Calculating mutual information across multiple MCD forward passes 
+    mutual_info = entropy - np.mean(np.sum(-dropout_predictions * np.log(dropout_predictions + epsilon),
+                                           axis=-1), axis=0)  # shape (n_samples,)
 
 
 if __name__ == "__main__":
@@ -143,7 +264,7 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
 """
         )
     args = tyro.cli(Args)
-    args.env_kwargs = {"size": args.env_size}
+    env_args = vars(EnvArgs())
     assert args.num_envs == 1, "vectorized envs are not supported at the moment"
     run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
     if args.track:
@@ -174,7 +295,7 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
 
     # env setup
     envs = gym.vector.SyncVectorEnv(
-        [make_env(args.env_id, args.seed + i, i, args.capture_video, run_name, env_kwargs=args.env_kwargs) for i in range(args.num_envs)]
+        [make_env(args.env_id, args.seed + i, i, args.capture_video, run_name, env_kwargs=env_args) for i in range(args.num_envs)]
     )
     assert isinstance(envs.single_action_space, gym.spaces.Discrete), "only discrete action space is supported"
 
@@ -267,6 +388,7 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
             Model=QNetwork,
             device=device,
             epsilon=0.05,
+            env_kwargs=env_args
         )
         for idx, episodic_return in enumerate(episodic_returns):
             writer.add_scalar("eval/episodic_return", episodic_return, idx)
