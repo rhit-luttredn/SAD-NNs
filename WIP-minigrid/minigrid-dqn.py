@@ -37,7 +37,7 @@ class EnvArgs:
     see_through_walls: bool = True
     """whether the agent can see through walls"""
 
-    wall_density: int = 0.5
+    wall_density: int = 0.01
     use_lava: bool = False
 
     # wall_freq: int = 2
@@ -64,9 +64,9 @@ class Args:
     """the wandb's project name"""
     wandb_entity: str = None
     """the entity (team) of wandb's project"""
-    capture_video: bool = False
+    capture_video: bool = True
     """whether to capture videos of the agent performances (check out `videos` folder)"""
-    save_model: bool = False
+    save_model: bool = True
     """whether to save model into the `runs/{run_name}` folder"""
 
     # Algorithm specific arguments
@@ -78,16 +78,16 @@ class Args:
     """the learning rate of the optimizer"""
     num_envs: int = 1
     """the number of parallel game environments"""
-    buffer_size: int = 1000000
+    buffer_size: int = 150_000
     """the replay memory buffer size"""
     gamma: float = 0.99
     """the discount factor gamma"""
     tau: float = 1.0
     """the target network update rate"""
-    target_network_frequency: int = 1000
+    target_network_frequency: int = 500
     """the timesteps it takes to update the target network"""
     batch_size: int = 32
-    """the batch size of sample from the reply memory"""
+    """the batch size of sample from the replay memory"""
     start_e: float = 1
     """the starting epsilon for exploration"""
     end_e: float = 0.01
@@ -98,7 +98,7 @@ class Args:
     """timestep to start learning"""
     train_frequency: int = 4
     """the frequency of training"""
-    dropout_frequency: int = 500
+    dropout_frequency: int = 2000
     """the frequency of dropout"""
 
 
@@ -173,7 +173,7 @@ def linear_schedule(start_e: float, end_e: float, duration: int, t: int):
     return max(slope * t + start_e, end_e)
 
 
-def get_monte_carlo_predictions(envs: VectorEnv, agent: QNetwork, forward_passes: int, eval_episodes: int, device: torch.device = 1):
+def mc_dropout(envs: VectorEnv, agent: QNetwork, forward_passes: int, eval_episodes: int, device: torch.device):
     """ Function to get the monte-carlo samples and uncertainty estimates
     through multiple forward passes
 
@@ -201,51 +201,57 @@ def get_monte_carlo_predictions(envs: VectorEnv, agent: QNetwork, forward_passes
 
     variances = []
     entropies = []
+    mutual_infos = []
     episode_count = 0
     agent.enable_dropout()
 
-    while episode_count < eval_episodes:
-        # MC Dropout
-        with torch.no_grad():
+    with torch.no_grad():
+        while episode_count < eval_episodes:
+            # MC Dropout
             dropout_vals = [agent(torch.Tensor(obs).to(device)) for _ in range(forward_passes)]
-        dropout_vals = torch.stack(dropout_vals, dim=0).to(device)  # shape (forward_passes, num_envs, n_classes)
-        dropout_vals = softmax(dropout_vals)  # shape (forward_passes, num_envs, n_classes)
+            dropout_vals = torch.stack(dropout_vals, dim=0).to(device)  # shape (forward_passes, num_envs, n_classes)
+            dropout_vals = softmax(dropout_vals)  # shape (forward_passes, num_envs, n_classes)
 
-        # Calculate variance and entropy
-        variance = torch.var(dropout_vals, dim=0)  # shape (num_envs, n_classes)
-        variances.append(variance)
+            assert torch.isfinite(dropout_vals).all(), "dropout_vals has non-finite values"
 
-        epsilon = sys.float_info.min
-        mean = torch.mean(dropout_vals, dim=0)  # shape (num_envs, n_classes)
-        entropy = -torch.sum(mean * torch.log(mean + epsilon), axis=-1)  # shape (num_envs,)
-        entropies.append(entropy)
+            # Calculate variance and entropy
+            variance = torch.var(dropout_vals, dim=0)  # shape (num_envs, n_classes)
+            variances.append(variance)
 
-        # Take a step
-        # q_values = agent(torch.Tensor(obs).to(device))
-        actions = torch.argmax(dropout_vals, dim=-1)  # shape (forward_passes, num_envs)
-        actions = actions.permute(1, 0)  # shape (num_envs, forward_passes)
-        actions = torch.mode(actions, dim=1).values.cpu().numpy()
-        # actions = torch.argmax(mean, dim=1).cpu().numpy()
-        next_obs, _, _, _, infos = envs.step(actions)
-        if "final_info" in infos:
-            for info in infos["final_info"]:
-                if "episode" not in info:
-                    continue
-                episode_count += 1
-                # print(f"eval_episode={len(episodic_returns)}, episodic_return={info['episode']['r']}")
-                # episodic_returns += [info["episode"]["r"]]
-        obs = next_obs
+            mean = torch.mean(dropout_vals, dim=0)  # shape (num_envs, n_classes)
+            entropy = -torch.sum(mean * torch.log(mean + 1e-8), axis=-1)  # shape (num_envs,)
+            assert torch.isfinite(entropy).all(), "entropy has non-finite values"
+            entropies.append(entropy)
+
+            # mutual_info = entropy - np.mean(np.sum(-dropout_vals * np.log(dropout_vals + epsilon), axis=-1), axis=0)  # shape (num_envs,)
+            mutual_info = entropy - torch.mean(torch.sum(-dropout_vals * torch.log(dropout_vals + 1e-8), axis=-1), axis=0)  # shape (num_envs,)
+            mutual_infos.append(mutual_info)
+
+            # Take a step
+            actions = torch.argmax(dropout_vals, dim=-1)  # shape (forward_passes, num_envs)
+            actions = actions.permute(1, 0)  # shape (num_envs, forward_passes)
+            actions = torch.mode(actions, dim=1).values.cpu().numpy()
+
+            next_obs, _, _, _, infos = envs.step(actions)
+            if "final_info" in infos:
+                for info in infos["final_info"]:
+                    if "episode" not in info:
+                        continue
+                    episode_count += 1
+            obs = next_obs
     
     agent.disable_dropout()
-    
+
     # Aggregate the results
-    variance = torch.cat(variances, dim=0)  # shape (eval_episodes * num_envs, n_classes)
-    variance = torch.mean(variance, dim=0)  # shape (n_classes,)
+    variances = torch.cat(variances, dim=0)  # shape (eval_episodes * num_envs, n_classes)
+    variance = torch.mean(variances, dim=0)  # shape (n_classes,)
     entropies = torch.cat(entropies, dim=0)  # shape (eval_episodes * num_envs,)
     entropy = torch.mean(entropies)  # shape (1,)
+    mutual_infos = torch.cat(mutual_infos, dim=0)  # shape (eval_episodes * num_envs,)
+    mutual_info = torch.mean(mutual_infos)  # shape (1,)
 
     print("Monte Carlo took", time.time() - start_time, "seconds")
-    return entropy.item(), variance
+    return entropy.item(), variance, mutual_info.item()
 
 
 if __name__ == "__main__":
@@ -314,17 +320,17 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
     for global_step in range(args.total_timesteps):
         # Uncertainty Estimation
         if global_step % args.dropout_frequency == 0:
-            entropy, variance = get_monte_carlo_predictions(envs, q_network, forward_passes=10, eval_episodes=args.num_envs, device=device)
+            entropy, variance, mutual_info = mc_dropout(envs, q_network, forward_passes=10, eval_episodes=args.num_envs, device=device)
+
             epsilon = entropy / np.log(envs.single_action_space.n)
             explore_dist = torch.distributions.Categorical(probs=variance)
-            print(f"epsilon={epsilon}, explore_dist={explore_dist.probs}")
+            print(f"epsilon={epsilon}, explore_dist={explore_dist.probs}, mutual_info={mutual_info}")
 
             writer.add_scalar("uncertainty/variance", variance.mean(), global_step)
             writer.add_scalar("uncertainty/entropy", entropy, global_step)
 
         # ALGO LOGIC: put action logic here
         # epsilon = linear_schedule(args.start_e, args.end_e, args.exploration_fraction * args.total_timesteps, global_step)
-        # epsilon = 1 - args.start_e
         if random.random() < epsilon:
             # actions = np.array([envs.single_action_space.sample() for _ in range(envs.num_envs)])
             actions = explore_dist.sample(sample_shape=(envs.num_envs,)).cpu().numpy()
@@ -381,7 +387,7 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
                     )
 
     if args.save_model:
-        model_path = f"runs/{run_name}/{args.exp_name}.cleanrl_model"
+        model_path = f"../runs/{run_name}/{args.exp_name}.cleanrl_model"
         torch.save(q_network.state_dict(), model_path)
         print(f"model saved to {model_path}")
         from sad_nns.utils.cleanrl.evals.dqn_eval import evaluate
