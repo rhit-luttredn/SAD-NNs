@@ -1,3 +1,4 @@
+#!/usr/bin/env python
 # docs and experiment results can be found at https://docs.cleanrl.dev/rl-algorithms/ppo/#ppopy
 import os
 import random
@@ -68,11 +69,8 @@ class Args:
     save_model: bool = False
     """whether to save model into the `runs/{run_name}` folder"""
 
-    # Environment specific arguments
-    # env_size: int = 10
-
     # Algorithm specific arguments
-    env_id: str = "SimpleEnv-v0"
+    env_id: str = "MineFieldEnv-v0"
     """the id of the environment"""
     total_timesteps: int = 150_000
     """total timesteps of the experiments"""
@@ -100,6 +98,8 @@ class Args:
     """timestep to start learning"""
     train_frequency: int = 4
     """the frequency of training"""
+    dropout_frequency: int = 500
+    """the frequency of dropout"""
 
 
 def make_env(env_id, idx, capture_video, run_name, env_kwargs: dict = {}):
@@ -122,6 +122,7 @@ class QNetwork(nn.Module):
         height = envs.single_observation_space.shape[0]
         width = envs.single_observation_space.shape[1]
         n_input_channels = envs.single_observation_space.shape[2]
+        self.dropout_layers = []
 
         conv_layers = nn.Sequential(
             nn.Conv2d(n_input_channels, 16, 8, padding=1),
@@ -189,37 +190,42 @@ def get_monte_carlo_predictions(envs: VectorEnv, agent: QNetwork, forward_passes
     device : torch.device
         device to be used for computation
     """
-    num_envs = envs.num_envs
-    n_classes = envs.single_action_space.n
-
-    dropout_predictions = np.empty((0, num_envs, n_classes))
-    softmax = nn.Softmax(dim=1)
+    print("Starting Monte Carlo")
+    start_time = time.time()
+    # num_envs = envs.num_envs
+    # n_classes = envs.single_action_space.n
+    softmax = nn.Softmax(dim=-1)
 
     agent.eval()
     obs, _ = envs.reset()
-    epsilon = 1
 
-    mutual_infos = []
     variances = []
+    entropies = []
     episode_count = 0
+    agent.enable_dropout()
+
     while episode_count < eval_episodes:
         # MC Dropout
-        agent.enable_dropout()
-        dropout_vals = [agent(torch.Tensor(obs).to(device)) for _ in range(forward_passes)]
-        dropout_vals = np.array([softmax(vals).cpu().detach().numpy() for vals in dropout_vals])  # shape (num_envs, n_classes)
+        with torch.no_grad():
+            dropout_vals = [agent(torch.Tensor(obs).to(device)) for _ in range(forward_passes)]
+        dropout_vals = torch.stack(dropout_vals, dim=0).to(device)  # shape (forward_passes, num_envs, n_classes)
+        dropout_vals = softmax(dropout_vals)  # shape (forward_passes, num_envs, n_classes)
 
-        mean = np.mean(dropout_predictions, axis=0)  # shape (num_envs, n_classes)
-        variance = np.var(dropout_predictions, axis=0)  # shape (num_envs, n_classes)
-        variances.append(np.mean(variance, axis=0))
+        # Calculate variance and entropy
+        variance = torch.var(dropout_vals, dim=0)  # shape (num_envs, n_classes)
+        variances.append(variance)
 
         epsilon = sys.float_info.min
-        entropy = -np.sum(mean * np.log(mean + epsilon), axis=-1)  # shape (num_envs,)
-        mutual_info = entropy - np.mean(np.sum(-dropout_predictions * np.log(dropout_predictions + epsilon), axis=-1), axis=0)  # shape (num_envs,)
-        mutual_infos.append(np.mean(mutual_info))
+        mean = torch.mean(dropout_vals, dim=0)  # shape (num_envs, n_classes)
+        entropy = -torch.sum(mean * torch.log(mean + epsilon), axis=-1)  # shape (num_envs,)
+        entropies.append(entropy)
 
-        agent.disable_dropout()
-        q_values = agent(torch.Tensor(obs).to(device))
-        actions = torch.argmax(q_values, dim=1).cpu().numpy()
+        # Take a step
+        # q_values = agent(torch.Tensor(obs).to(device))
+        actions = torch.argmax(dropout_vals, dim=-1)  # shape (forward_passes, num_envs)
+        actions = actions.permute(1, 0)  # shape (num_envs, forward_passes)
+        actions = torch.mode(actions, dim=1).values.cpu().numpy()
+        # actions = torch.argmax(mean, dim=1).cpu().numpy()
         next_obs, _, _, _, infos = envs.step(actions)
         if "final_info" in infos:
             for info in infos["final_info"]:
@@ -230,16 +236,16 @@ def get_monte_carlo_predictions(envs: VectorEnv, agent: QNetwork, forward_passes
                 # episodic_returns += [info["episode"]["r"]]
         obs = next_obs
     
+    agent.disable_dropout()
+    
     # Aggregate the results
-    mutual_infos = np.array(mutual_infos)  # shape (eval_episodes)
-    mutual_info = np.mean(mutual_infos)
-    variances = np.array(variances)  # shape (eval_episodes, n_classes)
-    variance = np.mean(variances, axis=0)  # shape (n_classes,)
+    variance = torch.cat(variances, dim=0)  # shape (eval_episodes * num_envs, n_classes)
+    variance = torch.mean(variance, dim=0)  # shape (n_classes,)
+    entropies = torch.cat(entropies, dim=0)  # shape (eval_episodes * num_envs,)
+    entropy = torch.mean(entropies)  # shape (1,)
 
-    print("Mutual Information:", mutual_info)
-    print("Variance:", variance)
-
-    return mutual_info, variance
+    print("Monte Carlo took", time.time() - start_time, "seconds")
+    return entropy.item(), variance
 
 
 if __name__ == "__main__":
@@ -284,7 +290,7 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
 
     # env setup
     envs = gym.vector.SyncVectorEnv(
-        [make_env(args.env_id, args.seed + i, i, args.capture_video, run_name, env_kwargs=env_args) for i in range(args.num_envs)]
+        [make_env(args.env_id, i, args.capture_video, run_name, env_kwargs=env_args) for i in range(args.num_envs)]
     )
     assert isinstance(envs.single_action_space, gym.spaces.Discrete), "only discrete action space is supported"
 
@@ -306,10 +312,22 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
     # TRY NOT TO MODIFY: start the game
     obs, _ = envs.reset(seed=args.seed)
     for global_step in range(args.total_timesteps):
+        # Uncertainty Estimation
+        if global_step % args.dropout_frequency == 0:
+            entropy, variance = get_monte_carlo_predictions(envs, q_network, forward_passes=10, eval_episodes=args.num_envs, device=device)
+            epsilon = entropy / np.log(envs.single_action_space.n)
+            explore_dist = torch.distributions.Categorical(probs=variance)
+            print(f"epsilon={epsilon}, explore_dist={explore_dist.probs}")
+
+            writer.add_scalar("uncertainty/variance", variance.mean(), global_step)
+            writer.add_scalar("uncertainty/entropy", entropy, global_step)
+
         # ALGO LOGIC: put action logic here
-        epsilon = linear_schedule(args.start_e, args.end_e, args.exploration_fraction * args.total_timesteps, global_step)
+        # epsilon = linear_schedule(args.start_e, args.end_e, args.exploration_fraction * args.total_timesteps, global_step)
+        # epsilon = 1 - args.start_e
         if random.random() < epsilon:
-            actions = np.array([envs.single_action_space.sample() for _ in range(envs.num_envs)])
+            # actions = np.array([envs.single_action_space.sample() for _ in range(envs.num_envs)])
+            actions = explore_dist.sample(sample_shape=(envs.num_envs,)).cpu().numpy()
         else:
             q_values = q_network(torch.Tensor(obs).to(device))
             actions = torch.argmax(q_values, dim=1).cpu().numpy()
