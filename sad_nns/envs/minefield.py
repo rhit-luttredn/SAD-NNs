@@ -65,8 +65,8 @@ class MineFieldEnv(MiniGridEnv):
         self.agent_dir = self.agent_start_dir
 
         # Place a goal square in the bottom-right corner
-        goal_pos = (width-2, height-2)
-        self.put_obj(Goal(), *goal_pos)
+        self.goal_pos = (width-2, height-2)
+        self.put_obj(Goal(), *self.goal_pos)
 
         # Generate the surrounding walls
         self.grid.wall_rect(0, 0, width, height)
@@ -79,7 +79,7 @@ class MineFieldEnv(MiniGridEnv):
             width - 2, 
             height - 2, 
             (self.agent_pos[0] - 1, self.agent_pos[1] - 1),
-            (goal_pos[0] - 1, goal_pos[1] - 1)
+            (self.goal_pos[0] - 1, self.goal_pos[1] - 1)
         )
         grid = grid * path
 
@@ -116,3 +116,17 @@ class MineFieldEnv(MiniGridEnv):
         grid[end[1], end[0]] = 0
 
         return grid
+    
+    def step(self, action):
+        obs, reward, terminated, truncated, info = super().step(action)
+        if terminated:
+            assert reward > 0, "The agent should have reached the goal."
+            reward = reward / 2 + 0.5
+        elif truncated:
+            assert reward == 0, "The agent should NOT have reached the goal."
+            # calc manhattan distance to goal
+            dist = abs(self.agent_pos[0] - self.goal_pos[0]) + abs(self.agent_pos[1] - self.goal_pos[1])
+            reward = 1 / (dist + 1)
+            reward /= 2
+
+        return obs, reward, terminated, truncated, info

@@ -196,7 +196,7 @@ def mc_dropout(envs: VectorEnv, agent: QNetwork, forward_passes: int, eval_episo
     # n_classes = envs.single_action_space.n
     softmax = nn.Softmax(dim=-1)
 
-    agent.eval()
+    # agent.eval()
     obs, _ = envs.reset()
 
     variances = []
@@ -240,7 +240,7 @@ def mc_dropout(envs: VectorEnv, agent: QNetwork, forward_passes: int, eval_episo
                     episode_count += 1
             obs = next_obs
     
-    agent.disable_dropout()
+    # agent.disable_dropout()
 
     # Aggregate the results
     variances = torch.cat(variances, dim=0)  # shape (eval_episodes * num_envs, n_classes)
@@ -322,15 +322,15 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
         if global_step % args.dropout_frequency == 0:
             entropy, variance, mutual_info = mc_dropout(envs, q_network, forward_passes=10, eval_episodes=args.num_envs, device=device)
 
-            epsilon = entropy / np.log(envs.single_action_space.n)
             explore_dist = torch.distributions.Categorical(probs=variance)
-            print(f"epsilon={epsilon}, explore_dist={explore_dist.probs}, mutual_info={mutual_info}")
+            print(f"entropy={entropy}, variance={variance}, mutual_info={mutual_info}")
 
             writer.add_scalar("uncertainty/variance", variance.mean(), global_step)
             writer.add_scalar("uncertainty/entropy", entropy, global_step)
 
         # ALGO LOGIC: put action logic here
         # epsilon = linear_schedule(args.start_e, args.end_e, args.exploration_fraction * args.total_timesteps, global_step)
+        epsilon = entropy / np.log(envs.single_action_space.n)
         if random.random() < epsilon:
             # actions = np.array([envs.single_action_space.sample() for _ in range(envs.num_envs)])
             actions = explore_dist.sample(sample_shape=(envs.num_envs,)).cpu().numpy()
