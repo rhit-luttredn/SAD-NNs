@@ -65,15 +65,15 @@ class Args:
     """target smoothing coefficient (default: 0.005)"""
     batch_size: int = 256
     """the batch size of sample from the reply memory"""
-    policy_noise: float = 0.1 #IDK just trying to make it match
+    policy_noise: float = 0.01 #IDK just trying to make it match
     """the scale of policy noise"""
-    exploration_noise: float = 0.1
+    exploration_noise: float = 0.01
     """the scale of exploration noise"""
     learning_starts: int = 5000 #Matching again #250#25e3
     """timestep to start learning"""
     policy_frequency: int = 2
     """the frequency of training policy (delayed)"""
-    noise_clip: float = 0.5
+    noise_clip: float = 0.05
     """noise clip parameter of the Target Policy Smoothing Regularization"""
 
 
