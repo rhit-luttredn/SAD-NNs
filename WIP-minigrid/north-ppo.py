@@ -10,6 +10,7 @@ from operator import mul
 import gymnasium as gym
 import neurops
 import numpy as np
+import pandas as pd
 import sad_nns.envs
 import torch
 import torch.nn as nn
@@ -40,11 +41,11 @@ class Args:
     """the entity (team) of wandb's project"""
     capture_video: bool = False
     """whether to capture videos of the agent performances (check out `videos` folder)"""
-    save_model: bool = False
+    save_model: bool = True
     """whether to save model into the `runs/{run_name}` folder"""
 
     # Algorithm specific arguments
-    env_id: str = "SimpleEnv-v0"
+    env_id: str = "MineFieldEnv-v0"
     # env_id: str = "BreakoutNoFrameskip-v4"
     """the id of the environment"""
     total_timesteps: int = 15_000
@@ -102,6 +103,8 @@ class Args:
     env_kwargs: dict = None
     """the additional kwargs to pass to the gym environment (computed in runtime)"""
 
+def count_parameters(model: nn.Module):
+    return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
 def make_env(env_id, idx, capture_video, run_name, env_kwargs: dict = {}):
     def thunk():
@@ -207,7 +210,7 @@ if __name__ == "__main__":
             monitor_gym=True,
             save_code=True,
         )
-    writer = SummaryWriter(f"../runs/{run_name}")
+    writer = SummaryWriter(f"../runs4/{run_name}")
     writer.add_text(
         "hyperparameters",
         "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])),
@@ -226,6 +229,16 @@ if __name__ == "__main__":
         [make_env(args.env_id, i, args.capture_video, run_name, env_kwargs=args.env_kwargs) for i in range(args.num_envs)],
     )
     assert isinstance(envs.single_action_space, gym.spaces.Discrete), "only discrete action space is supported"
+
+    df = pd.DataFrame(
+        columns=[
+            "# Total Parameters", 
+            "# Total Neurons", 
+            "Model Summary", 
+            "Environment", 
+            "Size",
+            "Average Test Reward"
+        ])
 
     agent = Agent(envs).to(device)
     optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
@@ -392,7 +405,7 @@ if __name__ == "__main__":
                 agent.growth_net.grow(i, to_add, fanin_weights="kaiming_uniform", optimizer=optimizer)
 
     if args.save_model:
-        model_path = f"../runs/{run_name}/{args.exp_name}.model"
+        model_path = f"../runs4/{run_name}/{args.exp_name}.model"
         torch.save(agent.state_dict(), model_path)
         print(f"model saved to {model_path}")
         from sad_nns.utils.cleanrl.evals.ppo_eval import evaluate
@@ -411,5 +424,20 @@ if __name__ == "__main__":
         for idx, episodic_return in enumerate(episodic_returns):
             writer.add_scalar("eval/episodic_return", episodic_return, idx)
 
+    total_neurons = sum(p.numel() for p in agent.network.parameters() if p.requires_grad)
+
+    print(np.mean(episodic_returns))
+
+    df.loc[len(df.index)] = {
+            "# Total Parameters": count_parameters(agent.network),
+            "# Total Neurons": total_neurons,
+            "Model Summary": str(agent.network),
+            "Environment": args.env_id,
+            "Size": args.env_size,
+            "Average Test Reward": np.mean(episodic_returns)
+        }
+
     envs.close()
     writer.close()
+    
+    df.to_csv(f"../runs4/{run_name}/results.csv", index=False)

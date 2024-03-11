@@ -92,9 +92,9 @@ class Args:
     # linear_sizes: list = field(default_factory=lambda: [64])
     linear_sizes: list = field(default_factory=lambda: [(8, 16, 32), (16, 32, 64), (32, 64, 128)])
     """the possible output sizes for the each linear layers. Each tuple is a set for one layer"""
-    training_loops: int = 5
+    training_loops: int = 20
     """the number of independent training loops for each experiment"""
-    max_architectures: int = None
+    max_architectures: int = 5
     """the total number of architectures to test"""
 
     # Environment specific arguments
@@ -473,7 +473,7 @@ def main():
         for train_loop in range(args.training_loops):
             print(f"Iteration: {train_loop}")
             print("Training...")
-            writer = SummaryWriter(f"../runs2/{run_name}/model-{i}")
+            writer = SummaryWriter(f"../runs3/{run_name}/model-{i}")
             writer.add_text(
                 "hyperparameters",
                 "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])),
@@ -483,7 +483,7 @@ def main():
 
             # Test the model
             print("Testing...")
-            model_path = f"../runs2/{run_name}/model-{i}/{args.exp_name}.model"
+            model_path = f"../runs3/{run_name}/model-{i}/{args.exp_name}.model"
             torch.save(agent.state_dict(), model_path)
             print(f"model {i} saved to {model_path}")
 
@@ -518,7 +518,7 @@ def main():
 
     envs.close()
 
-    df.to_csv(f"../runs2/{run_name}/results.csv", index=False)
+    df.to_csv(f"../runs3/{run_name}/results.csv", index=False)
 
     # fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(20, 6))
 
