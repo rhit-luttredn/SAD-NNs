@@ -47,7 +47,7 @@ class Args:
     """whether to capture videos of the agent performances (check out `videos` folder)"""
 
     # Algorithm specific arguments
-    env_id: str = "MineFieldEnv-v0"
+    env_id: str = "WallEnv-v0"
     """the id of the environment"""
     total_timesteps: int = 50_000
     """total timesteps of the experiments"""
@@ -88,10 +88,14 @@ class Args:
     # conv_sizes: list = field(default_factory=lambda: [(8, 16), (16, 32)])
     conv_sizes: list = field(default_factory=lambda: [(8, 16, 32), (16, 32, 64), (32, 64, 128)])
     """the possible output channels for the each convolutional layers. Each tuple is a set for one layer"""
-    linear_sizes: list = field(default_factory=lambda: [[64], [64], [64]])
+    # linear_sizes: list = field(default_factory=lambda: [[64], [64], [64]])
     # linear_sizes: list = field(default_factory=lambda: [64])
-    # linear_sizes: list = field(default_factory=lambda: [64, 128, 256])
+    linear_sizes: list = field(default_factory=lambda: [(8, 16, 32), (16, 32, 64), (32, 64, 128)])
     """the possible output sizes for the each linear layers. Each tuple is a set for one layer"""
+    training_loops: int = 5
+    """the number of independent training loops for each experiment"""
+    max_architectures: int = None
+    """the total number of architectures to test"""
 
     # Environment specific arguments
     env_size: int = 10
@@ -384,7 +388,6 @@ def main():
     args.num_iterations = args.total_timesteps // args.batch_size
     args.env_kwargs = {
         "size": args.env_size,
-        "wall_density": args.wall_density,
         "use_lava": args.use_lava,
     }
     run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
@@ -430,23 +433,27 @@ def main():
             "# Total Neurons", 
             "Model Summary", 
             "Environment", 
-            "Wall Density",
+            "Size",
             "Use Lava",
             "Average Test Reward", 
+            "Test Reward Variance"
         ])
 
     # Generate all possible combinations of architectures
-    arch_params = [args.conv_sizes, args.linear_sizes]
-    architectures = list(product(*[product(*x) for x in arch_params]))
+    # arch_params = [args.conv_sizes, args.linear_sizes]
+    # architectures = list(product(*[product(*x) for x in arch_params]))
+    architectures = list(product(*args.linear_sizes))
+    if args.max_architectures:
+        architectures = random.sample(architectures, args.max_architectures)
 
     # Iterate through each architecture
     start_time = time.time()
     model_rewards = []
-    for i, (conv_sizes, linear_sizes) in enumerate(architectures):
+    for i, linear_sizes in enumerate(architectures):
     # for i, model in enumerate(architectures):
         print(f'Iteration {i}/{len(architectures) - 1}')
         model_kwargs = {
-            "conv_sizes": conv_sizes,
+            "conv_sizes": [8, 16, 32],
             "linear_sizes": linear_sizes,
             "out_features": args.output_features,
         }
@@ -463,52 +470,55 @@ def main():
         parameter_log.append(count_parameters(agent.network))
         neuron_log.append(sum(p.numel() for p in agent.network.parameters() if p.requires_grad))
 
-        print("Training...")
-        writer = SummaryWriter(f"../runs/{run_name}/model-{i}")
-        writer.add_text(
-            "hyperparameters",
-            "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])),
-        )
+        for train_loop in range(args.training_loops):
+            print(f"Iteration: {train_loop}")
+            print("Training...")
+            writer = SummaryWriter(f"../runs2/{run_name}/model-{i}")
+            writer.add_text(
+                "hyperparameters",
+                "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])),
+            )
 
-        train_single_model(agent, optimizer, envs, writer, args)
+            train_single_model(agent, optimizer, envs, writer, args)
 
-        # Test the model
-        print("Testing...")
-        model_path = f"../runs/{run_name}/model-{i}/{args.exp_name}.model"
-        torch.save(agent.state_dict(), model_path)
-        print(f"model {i} saved to {model_path}")
+            # Test the model
+            print("Testing...")
+            model_path = f"../runs2/{run_name}/model-{i}/{args.exp_name}.model"
+            torch.save(agent.state_dict(), model_path)
+            print(f"model {i} saved to {model_path}")
 
-        episodic_returns = evaluate(
-            model_path,
-            make_env,
-            args.env_id,
-            eval_episodes=10,
-            run_name=f"{run_name}-eval",
-            Model=PPOAgent,
-            device=device,
-            capture_video=True,
-            env_kwargs=args.env_kwargs,
-            model_kwargs=model_kwargs,
-        )
-        model_rewards.append(np.mean(episodic_returns))
-        for idx, episodic_return in enumerate(episodic_returns):
-            writer.add_scalar("eval/episodic_return", episodic_return, idx)
-        
-        writer.close()
+            episodic_returns = evaluate(
+                model_path,
+                make_env,
+                args.env_id,
+                eval_episodes=10,
+                run_name=f"{run_name}-eval",
+                Model=PPOAgent,
+                device=device,
+                capture_video=True,
+                env_kwargs=args.env_kwargs,
+                model_kwargs=model_kwargs,
+            )
+            model_rewards.append(np.mean(episodic_returns))
+            for idx, episodic_return in enumerate(episodic_returns):
+                writer.add_scalar("eval/episodic_return", episodic_return, idx)
+            
+            writer.close()
 
         df.loc[len(df.index)] = {
             "# Total Parameters": parameter_log[i],
             "# Total Neurons": neuron_log[i],
             "Model Summary": str(agent.network),
             "Environment": args.env_id,
-            "Wall Density": args.wall_density,
+            "Size": args.env_size,
             "Use Lava": args.use_lava,
-            "Average Test Reward": np.mean(episodic_returns),
+            "Average Test Reward": np.mean(model_rewards),
+            "Test Reward Variance": np.std(model_rewards)
         }
 
     envs.close()
 
-    df.to_csv(f"../runs/{run_name}/results.csv", index=False)
+    df.to_csv(f"../runs2/{run_name}/results.csv", index=False)
 
     # fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(20, 6))
 

@@ -11,6 +11,7 @@ class WallEnv(MiniGridEnv):
         agent_start_pos=(1, 1),
         agent_start_dir=0,
         max_steps=None,
+        use_lava: bool = False,
         **kwargs,
     ):
         self.agent_start_pos = agent_start_pos
