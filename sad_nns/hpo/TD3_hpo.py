@@ -14,6 +14,7 @@ import torch.optim as optim
 import tyro
 from stable_baselines3.common.buffers import ReplayBuffer
 from torch.utils.tensorboard import SummaryWriter
+from torch.nn import LSTM
 
 
 @dataclass
@@ -93,24 +94,39 @@ def make_env(env_id, seed, idx, capture_video, run_name, env_kwargs: dict = {}):
 
 # ALGO LOGIC: initialize agent here:
 class QNetwork(nn.Module):
-    def __init__(self, env):
+    def __init__(self, env, lstm_hidden_size=256):
         super().__init__()
-        self.fc1 = nn.Linear(np.array(env.single_observation_space.shape).prod() + np.prod(env.single_action_space.shape), 256)
-        self.fc2 = nn.Linear(256, 64)
+        
+        # CHAT GPT
+        self.lstm = LSTM(input_size=np.array(env.single_observation_space.shape).prod() + np.prod(env.single_action_space.shape),
+                         hidden_size=lstm_hidden_size,
+                         batch_first=True)
+        # self.fc1 = nn.Linear(np.array(env.single_observation_space.shape).prod() + np.prod(env.single_action_space.shape), 256)
+        
+        self.fc2 = nn.Linear(lstm_hidden_size, 64)
         self.fc3 = nn.Linear(64, 1)
 
     def forward(self, x, a):
+        # CHAT GPT
         x = torch.cat([x, a], 1)
-        x = F.relu(self.fc1(x))
+        x, _ = self.lstm(x.unsqueeze(1))  # Unsqueeze to add a batch dimension
+        x = F.relu(x[:, -1, :])  # Take the last time step's output
+        
         x = F.tanh(self.fc2(x))
         x = self.fc3(x)
         return x
 
 
 class Actor(nn.Module):
-    def __init__(self, env):
+    def __init__(self, env, lstm_hidden_size=128):
         super().__init__()
-        self.fc1 = nn.Linear(np.array(env.single_observation_space.shape).prod(), 256)
+        
+        #CHAT GPT
+        self.lstm = LSTM(input_size=np.array(env.single_observation_space.shape).prod(),
+                         hidden_size=lstm_hidden_size,
+                         batch_first=True)
+        self.fc1 = nn.Linear(lstm_hidden_size, 256)
+        
         self.fc2 = nn.Linear(256, 256)
         self.fc_mu = nn.Linear(256, np.prod(env.single_action_space.shape))
         # action rescaling
@@ -122,6 +138,10 @@ class Actor(nn.Module):
         )
 
     def forward(self, x):
+        #CHAT GPT
+        x, _ = self.lstm(x.unsqueeze(1))  # Unsqueeze to add a batch dimension
+        x = F.relu(x[:, -1, :])  # Take the last time step's output
+        
         x = F.relu(self.fc1(x))
         x = F.relu(self.fc2(x))
         x = torch.tanh(self.fc_mu(x))
@@ -202,6 +222,10 @@ poetry run pip install "stable_baselines3==2.0.0a1"
             actions = np.array([envs.single_action_space.sample() for _ in range(envs.num_envs)])
         else:
             with torch.no_grad():
+                # #CHAT GPT
+                # # Unsqueeze to add a time dimension for LSTM input
+                # obs_with_time = torch.Tensor(obs).unsqueeze(0).unsqueeze(1).to(device)
+                # actions = actor(obs_with_time)
                 actions = actor(torch.Tensor(obs).to(device))
                 actions += torch.normal(0, actor.action_scale * args.exploration_noise)
                 actions = actions.cpu().numpy().clip(envs.single_action_space.low, envs.single_action_space.high)
@@ -231,6 +255,13 @@ poetry run pip install "stable_baselines3==2.0.0a1"
         if global_step > args.learning_starts:
             data = rb.sample(args.batch_size)
             with torch.no_grad():
+                
+                # #CHAT GPT
+                
+                # # Unsqueeze to add a time dimension for LSTM input
+                # data_observations = data.observations.unsqueeze(1)
+                # data_next_observations = data.next_observations.unsqueeze(1)
+                
                 clipped_noise = (torch.randn_like(data.actions, device=device) * args.policy_noise).clamp(
                     -args.noise_clip, args.noise_clip
                 ) * target_actor.action_scale
@@ -238,12 +269,16 @@ poetry run pip install "stable_baselines3==2.0.0a1"
                 next_state_actions = (target_actor(data.next_observations) + clipped_noise).clamp(
                     envs.single_action_space.low[0], envs.single_action_space.high[0]
                 )
+                
                 qf1_next_target = qf1_target(data.next_observations, next_state_actions)
                 qf2_next_target = qf2_target(data.next_observations, next_state_actions)
                 min_qf_next_target = torch.min(qf1_next_target, qf2_next_target)
                 next_q_value = data.rewards.flatten() + (1 - data.dones.flatten()) * args.gamma * (min_qf_next_target).view(-1)
                 # print(next_q_value)
 
+            # #CHAT GPT
+            # # Unsqueeze to add a time dimension for LSTM input
+            # data_observations = data.observations.unsqueeze(1)
             qf1_a_values = qf1(data.observations, data.actions).view(-1)
             qf2_a_values = qf2(data.observations, data.actions).view(-1)
             qf1_loss = F.mse_loss(qf1_a_values, next_q_value)
@@ -260,6 +295,10 @@ poetry run pip install "stable_baselines3==2.0.0a1"
             q_optimizer.step()
 
             if global_step % args.policy_frequency == 0:
+                # #CHAT GPT
+                # # Unsqueeze to add a time dimension for LSTM input
+                # data_observations = data.observations.unsqueeze(1)
+                
                 actor_loss = -qf1(data.observations, actor(data.observations)).mean()
                 actor_optimizer.zero_grad()
                 actor_loss.backward()
