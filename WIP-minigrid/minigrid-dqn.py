@@ -173,7 +173,7 @@ def linear_schedule(start_e: float, end_e: float, duration: int, t: int):
     return max(slope * t + start_e, end_e)
 
 
-def mc_dropout(envs: VectorEnv, agent: QNetwork, forward_passes: int, eval_episodes: int, device: torch.device):
+def mc_dropout(envs: VectorEnv, agent: QNetwork, forward_passes: int, eval_episodes: int, device: torch.device, verbose=False):
     """ Function to get the monte-carlo samples and uncertainty estimates
     through multiple forward passes
 
@@ -196,6 +196,7 @@ def mc_dropout(envs: VectorEnv, agent: QNetwork, forward_passes: int, eval_episo
     single_obs_shape = envs.single_observation_space.shape
     # n_classes = envs.single_action_space.n
     softmax = nn.Softmax(dim=-1)
+    softmax_temp = 0.1
 
     # agent.eval()
     obs, _ = envs.reset()
@@ -215,15 +216,29 @@ def mc_dropout(envs: VectorEnv, agent: QNetwork, forward_passes: int, eval_episo
             # MC Dropout
             dropout_vals = agent(obs)  # shape (forward_passes * num_envs, n_classes)
             dropout_vals = dropout_vals.view(forward_passes, num_envs, -1)  # shape (forward_passes, num_envs, n_classes)
-            dropout_vals = softmax(dropout_vals)  # shape (forward_passes, num_envs, n_classes)
+            # if verbose:
+            #     print("dropout:", dropout_vals)
+                # print("mean:", mean)
+            dropout_vals = softmax(dropout_vals / softmax_temp)  # shape (forward_passes, num_envs, n_classes)
+            # if verbose:
+            #     print("softmax:", dropout_vals)
             # assert torch.isfinite(dropout_vals).all(), "dropout_vals has non-finite values"
 
             # Calculate variance and entropy
             variance = torch.var(dropout_vals, dim=0)  # shape (num_envs, n_classes)
             variances.append(variance)
 
-            mean = torch.mean(dropout_vals, dim=0)  # shape (num_envs, n_classes)
-            entropy = -torch.sum(mean * torch.log(mean + 1e-8), axis=-1)  # shape (num_envs,)
+            # mean = torch.mean(dropout_vals, dim=0)  # shape (num_envs, n_classes)
+            # entropy = -torch.sum(mean * torch.log(mean + 1e-9), axis=-1)  # shape (num_envs,)
+
+            # if verbose:
+            #     new = -torch.sum(dropout_vals * torch.log(dropout_vals + 1e-9), axis=-1)
+            #     print("new:", new)
+            #     print("mean new:", torch.mean(new, axis=0))
+
+            entropy = -torch.sum(dropout_vals * torch.log(dropout_vals + 1e-9), axis=-1)  # shape (forward_passes, num_envs)
+            entropy = torch.mean(entropy, axis=0)  # shape (num_envs,)
+
             # assert torch.isfinite(entropy).all(), "entropy has non-finite values"
             entropies.append(entropy)
 
@@ -242,13 +257,13 @@ def mc_dropout(envs: VectorEnv, agent: QNetwork, forward_passes: int, eval_episo
 
             obs = next_obs
 
-    # Aggregate the results
-    variances = torch.cat(variances, dim=0).to(device)  # shape (eval_episodes * num_envs, n_classes)
-    variance = torch.mean(variances, dim=0)  # shape (n_classes,)
-    entropies = torch.cat(entropies, dim=0).to(device)  # shape (eval_episodes * num_envs,)
-    entropy = torch.mean(entropies)  # shape (1,)
-    mutual_infos = torch.cat(mutual_infos, dim=0).to(device)  # shape (eval_episodes * num_envs,)
-    mutual_info = torch.mean(mutual_infos)  # shape (1,)
+        # Aggregate the results
+        variances = torch.cat(variances, dim=0).to(device)  # shape (eval_episodes * num_envs, n_classes)
+        variance = torch.mean(variances, dim=0)  # shape (n_classes,)
+        entropies = torch.cat(entropies, dim=0).to(device)  # shape (eval_episodes * num_envs,)
+        entropy = torch.mean(entropies)  # shape (1,)
+        mutual_infos = torch.cat(mutual_infos, dim=0).to(device)  # shape (eval_episodes * num_envs,)
+        mutual_info = torch.mean(mutual_infos)  # shape (1,)
 
     print("Monte Carlo took", time.time() - start_time, "seconds")
     return entropy.item(), variance, mutual_info.item()
@@ -320,7 +335,7 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
     for global_step in range(args.total_timesteps):
         # Uncertainty Estimation
         if global_step % args.dropout_frequency == 0:
-            entropy, variance, mutual_info = mc_dropout(envs, q_network, forward_passes=10, eval_episodes=args.num_envs, device=device)
+            entropy, variance, mutual_info = mc_dropout(envs, q_network, forward_passes=10, eval_episodes=args.num_envs, device=device, verbose=global_step==0)
 
             explore_dist = torch.distributions.Categorical(probs=variance)
             print(f"entropy={entropy}, variance={variance}, mutual_info={mutual_info}")
@@ -332,8 +347,8 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
             writer.add_scalar("uncertainty/entropy", entropy, global_step)
 
         # ALGO LOGIC: put action logic here
-        # epsilon = linear_schedule(args.start_e, args.end_e, args.exploration_fraction * args.total_timesteps, global_step)
-        epsilon = entropy / np.log(envs.single_action_space.n)
+        epsilon = linear_schedule(args.start_e, args.end_e, args.exploration_fraction * args.total_timesteps, global_step)
+        # epsilon = entropy / np.log(envs.single_action_space.n)
         if random.random() < epsilon:
             # actions = np.array([envs.single_action_space.sample() for _ in range(envs.num_envs)])
             actions = explore_dist.sample(sample_shape=(envs.num_envs,)).cpu().numpy()
