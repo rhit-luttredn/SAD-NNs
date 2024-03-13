@@ -53,7 +53,7 @@ class Args:
     # Algorithm specific arguments
     env_id: str = "RegressionEnv-v0"
     """the id of the environment"""
-    total_timesteps: int = 50_000
+    total_timesteps: int = 150_000
     """total timesteps of the experiments"""
     learning_rate: float = 3e-4
     """the learning rate of the optimizer"""
@@ -69,7 +69,7 @@ class Args:
     """the scale of policy noise"""
     exploration_noise: float = 0.01
     """the scale of exploration noise"""
-    learning_starts: int = 5000 #Matching again #250#25e3
+    learning_starts: int = 5_000 #Matching again #250#25e3
     """timestep to start learning"""
     policy_frequency: int = 2
     """the frequency of training policy (delayed)"""
@@ -218,6 +218,7 @@ poetry run pip install "stable_baselines3==2.0.0a1"
     obs, _ = envs.reset(seed=args.seed)
     for global_step in range(args.total_timesteps):
         # ALGO LOGIC: put action logic here
+        noise_factor = (1-global_step/args.total_timesteps)
         if global_step < args.learning_starts:
             actions = np.array([envs.single_action_space.sample() for _ in range(envs.num_envs)])
         else:
@@ -227,7 +228,7 @@ poetry run pip install "stable_baselines3==2.0.0a1"
                 # obs_with_time = torch.Tensor(obs).unsqueeze(0).unsqueeze(1).to(device)
                 # actions = actor(obs_with_time)
                 actions = actor(torch.Tensor(obs).to(device))
-                actions += torch.normal(0, actor.action_scale * args.exploration_noise)
+                actions += torch.normal(0, actor.action_scale * args.exploration_noise*noise_factor)
                 actions = actions.cpu().numpy().clip(envs.single_action_space.low, envs.single_action_space.high)
 
         # TRY NOT TO MODIFY: execute the game and log data.
@@ -264,7 +265,7 @@ poetry run pip install "stable_baselines3==2.0.0a1"
                 
                 clipped_noise = (torch.randn_like(data.actions, device=device) * args.policy_noise).clamp(
                     -args.noise_clip, args.noise_clip
-                ) * target_actor.action_scale
+                ) * target_actor.action_scale * noise_factor
 
                 next_state_actions = (target_actor(data.next_observations) + clipped_noise).clamp(
                     envs.single_action_space.low[0], envs.single_action_space.high[0]
@@ -336,7 +337,7 @@ poetry run pip install "stable_baselines3==2.0.0a1"
             run_name=f"{run_name}-eval",
             Model=(Actor, QNetwork),
             device=device,
-            exploration_noise=args.exploration_noise,
+            exploration_noise=0,#args.exploration_noise,
         )
         for idx, episodic_return in enumerate(episodic_returns):
             writer.add_scalar("eval/episodic_return", episodic_return, idx)
