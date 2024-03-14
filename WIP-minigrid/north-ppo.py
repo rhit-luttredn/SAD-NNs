@@ -45,7 +45,7 @@ class Args:
     """whether to save model into the `runs/{run_name}` folder"""
 
     # Algorithm specific arguments
-    env_id: str = "MineFieldEnv-v0"
+    env_id: str = "WallEnv-v0"
     # env_id: str = "BreakoutNoFrameskip-v4"
     """the id of the environment"""
     total_timesteps: int = 15_000
@@ -86,11 +86,15 @@ class Args:
     """if toggled, the network will grow"""
     iterations_to_grow: int = 1
     """the grow the network every n iterations"""
-    threshold: float = 0.005
+    threshold: float = 0.001
     """the threshold to grow the network"""
 
+    # Experiment specific arguments
+    output_features: int = 64
+    """the number of output features for each model's feature extractor"""
+
     # Environment specific arguments
-    env_size: int = 10
+    env_size: int = 6
     """the height and width of the environment"""
 
     # to be filled in runtime
@@ -241,6 +245,7 @@ if __name__ == "__main__":
         ])
 
     agent = Agent(envs).to(device)
+    print(f'TEST: {[layer for layer in agent.network]}')
     optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
 
     # ALGO Logic: Storage setup
@@ -406,9 +411,18 @@ if __name__ == "__main__":
 
     if args.save_model:
         model_path = f"../runs4/{run_name}/{args.exp_name}.model"
+        print(f'Model path: {model_path}')
         torch.save(agent.state_dict(), model_path)
         print(f"model saved to {model_path}")
         from sad_nns.utils.cleanrl.evals.ppo_eval import evaluate
+
+        print(f'TEST: {[layer.weight.shape for layer in agent.network if isinstance(layer, nn.Linear)]}')
+
+        model_kwargs = {
+            "conv_sizes": [16, 32, 64],
+            "linear_sizes": [layer.weight.shape for layer in agent.network if isinstance(layer, nn.Linear)],
+            "out_features": args.output_features,
+        }
 
         episodic_returns = evaluate(
             model_path,
@@ -419,14 +433,15 @@ if __name__ == "__main__":
             Model=Agent,
             device=device,
             capture_video=False,
-            env_kwargs=args.env_kwargs
+            env_kwargs=args.env_kwargs,
+            model_kwargs=model_kwargs
         )
         for idx, episodic_return in enumerate(episodic_returns):
             writer.add_scalar("eval/episodic_return", episodic_return, idx)
 
     total_neurons = sum(p.numel() for p in agent.network.parameters() if p.requires_grad)
 
-    print(np.mean(episodic_returns))
+    print(f'Mean Episodic Return: {np.mean(episodic_returns)}')
 
     df.loc[len(df.index)] = {
             "# Total Parameters": count_parameters(agent.network),
