@@ -45,7 +45,7 @@ class Args:
     """whether to save model into the `runs/{run_name}` folder"""
 
     # Algorithm specific arguments
-    env_id: str = "WallEnv-v0"
+    env_id: str = "MineFieldEnv-v0"
     # env_id: str = "BreakoutNoFrameskip-v4"
     """the id of the environment"""
     total_timesteps: int = 15_000
@@ -96,6 +96,7 @@ class Args:
     # Environment specific arguments
     env_size: int = 6
     """the height and width of the environment"""
+    wall_density: float = 0.5
 
     # to be filled in runtime
     batch_size: int = 0
@@ -418,11 +419,11 @@ if __name__ == "__main__":
 
         print(f'TEST: {[layer.weight.shape for layer in agent.network if isinstance(layer, nn.Linear)]}')
 
-        model_kwargs = {
-            "conv_sizes": [16, 32, 64],
-            "linear_sizes": [layer.weight.shape for layer in agent.network if isinstance(layer, nn.Linear)],
-            "out_features": args.output_features,
-        }
+        # model_kwargs = {
+        #     "conv_sizes": [16, 32, 64],
+        #     "linear_sizes": [layer.weight.shape for layer in agent.network if isinstance(layer, nn.Linear)],
+        #     "out_features": args.output_features,
+        # }
 
         episodic_returns = evaluate(
             model_path,
@@ -434,7 +435,7 @@ if __name__ == "__main__":
             device=device,
             capture_video=False,
             env_kwargs=args.env_kwargs,
-            model_kwargs=model_kwargs
+            # model_kwargs=model_kwargs
         )
         for idx, episodic_return in enumerate(episodic_returns):
             writer.add_scalar("eval/episodic_return", episodic_return, idx)

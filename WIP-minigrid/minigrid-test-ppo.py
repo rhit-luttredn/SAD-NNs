@@ -94,7 +94,7 @@ class Args:
     """the possible output sizes for the each linear layers. Each tuple is a set for one layer"""
     u_training_loops: int = 10
     """the number of independent training loops for each experiment"""
-    training_loops: int = 10
+    training_loops: int = 5
     """the number of times to train each agent"""
     max_architectures: int = None
     """the total number of architectures to test"""
@@ -104,7 +104,7 @@ class Args:
     # Environment specific arguments
     env_size: int = 10
     """the size of the environment"""
-    wall_density: float = 0.5
+    wall_density: float = 0.8
     use_lava: bool = False
 
     # to be filled in runtime
