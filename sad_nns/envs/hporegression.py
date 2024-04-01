@@ -5,6 +5,7 @@ import torch.nn as nn
 from gymnasium import spaces
 from sad_nns.utils import random_regression
 
+
 class RegressionEnv(gym.Env):
     _max_epoch = 1024
     _min_epoch = 128
@@ -23,6 +24,7 @@ class RegressionEnv(gym.Env):
         action_low=[0.0, -1.0, 0.0],
         action_high=[1.0, 1.0, 1.0],
     ):
+        print("it was called")
         self._action_low = action_low
         self._action_high = action_high
         self.device = device
@@ -359,3 +361,242 @@ class RegressionEnv(gym.Env):
         info = self._get_info()
         # print(observation, self.avg_reward, done, False, info)
         return observation, self.avg_reward, done, False, info
+    
+class Regression_Env_no_time(gym.Env):
+    
+    _X_features_range = (10, 200)
+    _Y_features_range = (1, 20)
+    _samples_range = (500, 2000)
+    _max_layers = 10
+    _max_size = 200000
+    _nodes_range = (8, 128)
+    
+    
+    def __init__(self,
+                 device="cpu",
+                 seed=None,
+                 action_low=[-1.0, 0.0],
+                 action_high=[1.0, 1.0]) -> None:
+        self._action_low = action_low
+        self._action_high = action_high
+        self.device = device
+        if seed is not None:
+            self._set_seed(seed)
+        self._make_space()
+        self.loss_fn = nn.MSELoss()
+        super().__init__()
+        
+    def reward_metric(self, loss):
+        loss_factor = (1-loss/self.loss_baseline)#**self.loss_importance
+        if loss_factor<0:
+            return np.tanh(loss_factor)
+        return loss_factor
+    
+    def _get_reward(self, loss, initial_metric):
+        return self.reward_metric(loss) - initial_metric
+    
+    def _set_seed(self, seed = 0):
+        self.seed = seed
+        np.random.seed(seed)
+
+        if self.device == "cpu":
+            torch.manual_seed(seed)
+        else:
+            torch.cuda.manual_seed(seed)
+    
+    def _make_space(self):
+        self.observation_space = spaces.Dict({
+                "train loss" : spaces.Box(0.0,np.inf,()),
+                "valid loss" : spaces.Box(0.0,np.inf,()),
+                "budget usage": spaces.Box(0.0,1.0,()),
+                "X_features": spaces.Box(0.0,1.0,()),
+                "Y_features": spaces.Box(0.0,1.0,()),
+                # "train percent" : spaces.Box(0.0,1.0,()),
+                # "valid percent" : spaces.Box(0.0,1.0,()),
+                "layers" : spaces.Box(0.0,1.0,()),
+                "model size" : spaces.Box(0.0,1.0,()),
+            })
+        self.action_space = self.action_space = spaces.Box(
+            low=np.array(self._action_low),
+            high=np.array(self._action_high),
+            dtype=np.float32,
+            shape=(2,),
+        )
+        
+    def _get_observation(self):
+        observation = {
+            "train loss" : self.train_loss/self.loss_baseline,
+            "valid loss" : self.valid_loss/self.loss_baseline,
+            "budget usage": (self.epoch*1.0)/self.max_epoch,
+            "X_features": self.dataset_shape[0]/self._X_features_range[1],
+            "Y_features": self.dataset_shape[1]/self._Y_features_range[1],
+            # "train_samples": self.dataset_shape[2]/np.sum(self.dataset_shape[2:4]),
+            # "valid_samples": self.dataset_shape[3]/np.sum(self.dataset_shape[2:4]),
+            "layers" :self.layers/self._max_layers,
+            "model size" : self.size/self._max_size
+        }
+        if np.isnan(self.train_loss) or np.isnan(self.valid_loss):
+            observation["train loss"] = 0
+            observation["valid loss"] = 0
+        if any(np.isnan(val) for val in observation.values()):
+            print(observation)
+        return observation
+        
+    def _get_info(self):
+        return {}
+    
+    def _set_lr(self, lr):
+        for g in self.optimizer.param_groups:
+            g["lr"] = lr
+            
+    def reset(self, seed=None, options=None):
+        super().reset()
+        if seed is not None:
+            self._set_seed(seed)
+        self.dataset = random_regression()
+        X_train, Y_train, X_valid, Y_valid, X_test, Y_test = self.dataset
+        self.dataset_shape = (
+            X_train.shape[1],
+            Y_train.shape[1],
+            Y_train.shape[0],
+            Y_valid.shape[0],
+            Y_test.shape[0],
+        )
+        self.loss_baseline = np.std(np.concatenate((Y_train, Y_valid), axis=0)) ** 2
+        
+        self.X_train = torch.Tensor(X_train)
+        self.Y_train = torch.Tensor(Y_train)
+        self.X_valid = torch.Tensor(X_valid)
+        self.Y_valid = torch.Tensor(Y_valid)
+        self.X_test = torch.Tensor(X_test)
+        self.Y_test = torch.Tensor(Y_test)
+
+        self.model = nn.Sequential()
+
+        num_layers = np.random.randint(0, self._max_layers)
+        num_nodes = np.random.randint(*self._nodes_range)
+
+        in_features = self.dataset_shape[0]
+        for i in range(num_layers):
+            out_features = num_nodes
+            self.model.append(nn.Linear(in_features, out_features))
+            self.model.append(nn.ReLU())
+            in_features = out_features
+        out_features = self.dataset_shape[1]
+        self.model.append(nn.Linear(in_features, out_features))
+
+        self.layers =  len(
+                [
+                    module
+                    for module in self.model.modules()
+                    if isinstance(module, nn.Linear)
+                ]
+            )
+        self.size = sum(
+                p.numel() for p in self.model.parameters() if p.requires_grad
+            )
+
+        self.optimizer = torch.optim.Adam(self.model.parameters(), lr=0, betas=(0, 0))
+        # setting betas to zero gets us reasonably close to SGD
+        # torch.optim.SGD just doesnt work
+
+        self.model.eval()
+        self.train_loss = self.loss_fn(self.model(self.X_train), self.Y_train).mean().item()
+        self.valid_loss = self.loss_fn(self.model(self.X_valid), self.Y_valid).mean().item()
+
+        self.epoch = 0
+        self.max_epoch = 128
+        
+        self.initial_metric = self.reward_metric(self.valid_loss)
+        
+        observation = self._get_observation()
+        info = self._get_info()
+
+        return observation, info
+    
+    def step(self, action):
+        lr = action[0]
+        batch_ratio = action[1]
+
+        self._set_lr(lr)
+
+        training_samples = self.dataset_shape[3]
+        try:
+            batch_size = int(batch_ratio * training_samples)
+        except Exception as e:
+            print("BROKEN:", action)
+            print(batch_ratio, training_samples, batch_ratio * training_samples)
+            raise e
+
+        batch_size = max(batch_size, 1)
+        perm = np.random.permutation(training_samples)
+
+        self.epoch += 1
+        was_enabled = torch.is_grad_enabled()
+        torch.set_grad_enabled(
+            True
+        )  # Not really sure why but it won't work without this
+        self.model.train()
+
+        self.model.eval()
+        Y_pred = self.model(self.X_train)
+        self.train_loss = self.loss_fn(Y_pred, self.Y_train).mean().item()
+
+        Y_pred = self.model(self.X_valid)
+        self.valid_loss = self.loss_fn(Y_pred, self.Y_valid).mean().item()
+
+        troublemakers = [self.train_loss, self.valid_loss]
+        if np.isnan(troublemakers).any() or np.isinf(troublemakers).any():
+            observation = self._get_observation()
+            reward = -1.5
+            done = True
+            info = self._get_info()
+            # print(observation, reward, done, False, info)
+            return observation, reward, done, False, info
+
+        for i in range(0, training_samples, batch_size):
+            batch = perm[i : i + batch_size]
+            X_batch = self.X_train[batch]
+            Y_batch = self.Y_train[batch]
+            Y_pred = self.model(X_batch)
+
+            loss = self.loss_fn(Y_pred, Y_batch)
+            self.optimizer.zero_grad()
+            loss.backward()
+            self.optimizer.step()
+
+        torch.set_grad_enabled(was_enabled)
+
+        self.model.eval()
+        Y_pred = self.model(self.X_train)
+        self.train_loss = self.loss_fn(Y_pred, self.Y_train).mean().item()
+
+        Y_pred = self.model(self.X_valid)
+        self.valid_loss = self.loss_fn(Y_pred, self.Y_valid).mean().item()
+
+        reward = self._get_reward(
+            self.valid_loss,
+            self.initial_metric
+        )
+
+        done = False
+        if self.epoch >= self.max_epoch:
+            Y_pred = self.model(self.X_test)
+            test_loss = self.loss_fn(Y_pred, self.Y_test).mean().item()
+            reward += self._get_reward(test_loss, 1) # do better than baseline
+            done = True
+
+        # handle any NANs or Infs which will ruin everything
+        troublemakers = [self.train_loss, self.valid_loss]
+        if np.isnan(troublemakers).any() or np.isinf(troublemakers).any():
+            observation = self._get_observation()
+            reward = -1.5
+            done = True
+            info = self._get_info()
+            # print(observation, reward, done, False, info)
+            return observation, reward, done, False, info
+
+        observation = self._get_observation()
+        done = done
+        info = self._get_info()
+        return observation, reward, done, False, info 

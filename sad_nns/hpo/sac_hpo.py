@@ -36,9 +36,9 @@ class Args:
     """whether to capture videos of the agent performances (check out `videos` folder)"""
 
     # Algorithm specific arguments
-    env_id: str = "RegressionEnv-v0"
+    env_id: str = "RegressionEnv-v1"
     """the environment id of the task"""
-    total_timesteps: int = 1_000_000
+    total_timesteps: int = 20_000
     """total timesteps of the experiments"""
     buffer_size: int = int(1e6)
     """the replay memory buffer size"""
@@ -81,7 +81,7 @@ def make_env(env_id, seed, idx, capture_video, run_name, env_kwargs: dict = {}):
         # else:
         env = gym.make(env_id, **env_kwargs)
         env = gym.wrappers.FlattenObservation(env)
-        env = gym.wrappers.NormalizeObservation(env)
+        # env = gym.wrappers.NormalizeObservation(env)
         env = gym.wrappers.RecordEpisodeStatistics(env)
         env.action_space.seed(seed)
         return env
@@ -124,22 +124,25 @@ class Actor(nn.Module):
             "action_bias", torch.tensor((env.action_space.high + env.action_space.low) / 2.0, dtype=torch.float32)
         )
 
-    def forward(self, x):
-        x = F.relu(self.fc1(x))
-        x = F.relu(self.fc2(x))
-        mean = self.fc_mean(x)
-        log_std = self.fc_logstd(x)
+    def forward(self, x0):
+        x1 = F.relu(self.fc1(x0))
+        x2 = F.relu(self.fc2(x1))
+        mean = self.fc_mean(x2)
+        log_std = self.fc_logstd(x2)
         log_std = torch.tanh(log_std)
         log_std = LOG_STD_MIN + 0.5 * (LOG_STD_MAX - LOG_STD_MIN) * (log_std + 1)  # From SpinUp / Denis Yarats
-        # if(np.isnan((mean+log_std).cpu().detach().numpy()).any()):
-        #     print(x)
-        #     print(mean)
-        #     print(log_std)
+        if(np.isnan((mean+log_std).cpu().detach().numpy()).any()):
+            print(x0) 
+            print(x1)
+            print(x2)
+            print(mean)
+            print(log_std)
         return mean, log_std
 
     def get_action(self, x):
         # print(x)
         mean, log_std = self(x)
+        # print(mean,log_std)
         std = log_std.exp()
         normal = torch.distributions.Normal(mean, std)
         x_t = normal.rsample()  # for reparameterization trick (mean + std * N(0,1))

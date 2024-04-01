@@ -3,7 +3,7 @@ from sad_nns.envs.hardwall import HardWallEnv
 from sad_nns.envs.minefield import MineFieldEnv
 from sad_nns.envs.simple import SimpleEnv
 from sad_nns.envs.wall import WallEnv
-from sad_nns.envs.hporegression import RegressionEnv
+from sad_nns.envs.hporegression import RegressionEnv, Regression_Env_no_time
 
 register(
     id='SimpleEnv-v0',
@@ -28,4 +28,9 @@ register(
 register(
     id='RegressionEnv-v0',
     entry_point='sad_nns.envs:RegressionEnv',
+)
+
+register(
+    id='RegressionEnv-v1',
+    entry_point='sad_nns.envs:Regression_Env_no_time'
 )
