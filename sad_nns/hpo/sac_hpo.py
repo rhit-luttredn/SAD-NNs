@@ -1,8 +1,8 @@
-# docs and experiment results can be found at https://docs.cleanrl.dev/rl-algorithms/td3/#td3_continuous_actionpy
+# docs and experiment results can be found at https://docs.cleanrl.dev/rl-algorithms/sac/#sac_continuous_actionpy
 import os
 import random
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import gymnasium as gym
 import numpy as np
@@ -14,18 +14,7 @@ import torch.optim as optim
 import tyro
 from stable_baselines3.common.buffers import ReplayBuffer
 from torch.utils.tensorboard import SummaryWriter
-# from torch.nn import LSTM
-device = torch.device("cuda:2" if torch.cuda.is_available() else "cpu")
 
-
-@dataclass
-class EnvArgs:
-    # action_low=[0,-.001,0.0,.4,0.0,0.0]
-    # action_high=[1,.1,0.6,1.0,1.0,1.0]
-    action_low=[0,-.1,0]
-    action_high=[1,.1,1]
-    # To be computed at runtime
-    device = None
 
 @dataclass
 class Args:
@@ -45,20 +34,12 @@ class Args:
     """the entity (team) of wandb's project"""
     capture_video: bool = False
     """whether to capture videos of the agent performances (check out `videos` folder)"""
-    save_model: bool = True
-    """whether to save model into the `runs/{run_name}` folder"""
-    upload_model: bool = False
-    """whether to upload the saved model to huggingface"""
-    hf_entity: str = ""
-    """the user or org name of the model repository from the Hugging Face Hub"""
 
     # Algorithm specific arguments
     env_id: str = "RegressionEnv-v0"
-    """the id of the environment"""
-    total_timesteps: int = 100_000
+    """the environment id of the task"""
+    total_timesteps: int = 1_000_000
     """total timesteps of the experiments"""
-    learning_rate: float = 3e-4
-    """the learning rate of the optimizer"""
     buffer_size: int = int(1e6)
     """the replay memory buffer size"""
     gamma: float = 0.99
@@ -67,17 +48,30 @@ class Args:
     """target smoothing coefficient (default: 0.005)"""
     batch_size: int = 256
     """the batch size of sample from the reply memory"""
-    policy_noise: torch.Tensor = field(default_factory=lambda: torch.tensor([0.02,0.0002,0.02],device=device)) #IDK just trying to make it match
-    """the scale of policy noise"""
-    exploration_noise: torch.Tensor = field(default_factory=lambda: torch.tensor([0.01,0.0001,0.01],device=device))
-    """the scale of exploration noise"""
-    learning_starts: int = 5000 #Matching again #250#25e3
+    learning_starts: int = 5e3
     """timestep to start learning"""
+    policy_lr: float = 3e-4
+    """the learning rate of the policy network optimizer"""
+    q_lr: float = 1e-3
+    """the learning rate of the Q network network optimizer"""
     policy_frequency: int = 2
     """the frequency of training policy (delayed)"""
-    noise_clip: torch.Tensor = field(default_factory=lambda: torch.tensor([0.05,0.0005,0.05],device=device))
+    target_network_frequency: int = 1  # Denis Yarats' implementation delays this by 2.
+    """the frequency of updates for the target nerworks"""
+    noise_clip: float = 0.5
     """noise clip parameter of the Target Policy Smoothing Regularization"""
+    alpha: float = 0.2
+    """Entropy regularization coefficient."""
+    autotune: bool = True
+    """automatic tuning of the entropy coefficient"""
+    # clip: float = 0.01
 
+@dataclass
+class EnvArgs:
+    action_low=[0,-.1,0]
+    action_high=[1,.1,1]
+    # To be computed at runtime
+    device = None
 
 def make_env(env_id, seed, idx, capture_video, run_name, env_kwargs: dict = {}):
     def thunk():
@@ -87,6 +81,7 @@ def make_env(env_id, seed, idx, capture_video, run_name, env_kwargs: dict = {}):
         # else:
         env = gym.make(env_id, **env_kwargs)
         env = gym.wrappers.FlattenObservation(env)
+        env = gym.wrappers.NormalizeObservation(env)
         env = gym.wrappers.RecordEpisodeStatistics(env)
         env.action_space.seed(seed)
         return env
@@ -95,42 +90,32 @@ def make_env(env_id, seed, idx, capture_video, run_name, env_kwargs: dict = {}):
 
 
 # ALGO LOGIC: initialize agent here:
-class QNetwork(nn.Module):
-    def __init__(self, env):#, lstm_hidden_size=256):
+class SoftQNetwork(nn.Module):
+    def __init__(self, env):
         super().__init__()
-        
-        # CHAT GPT
-        # self.lstm = LSTM(input_size=np.array(env.single_observation_space.shape).prod() + np.prod(env.single_action_space.shape),
-        #                  hidden_size=lstm_hidden_size,
-        #                  batch_first=True)
         self.fc1 = nn.Linear(np.array(env.single_observation_space.shape).prod() + np.prod(env.single_action_space.shape), 256)
-        
-        self.fc2 = nn.Linear(256, 64)
-        self.fc3 = nn.Linear(64, 1)
+        self.fc2 = nn.Linear(256, 256)
+        self.fc3 = nn.Linear(256, 1)
 
     def forward(self, x, a):
-        # CHAT GPT
         x = torch.cat([x, a], 1)
-        # x, _ = self.lstm(x.unsqueeze(1))  # Unsqueeze to add a batch dimension
-        # x = F.relu(x[:, -1, :])  # Take the last time step's output
-        x = self.fc1(x)
-        x = F.tanh(self.fc2(x))
+        x = F.relu(self.fc1(x))
+        x = F.relu(self.fc2(x))
         x = self.fc3(x)
         return x
 
 
+LOG_STD_MAX = 2
+LOG_STD_MIN = -5
+
+
 class Actor(nn.Module):
-    def __init__(self, env):#, lstm_hidden_size=128):
+    def __init__(self, env):
         super().__init__()
-        
-        # #CHAT GPT
-        # self.lstm = LSTM(input_size=np.array(env.single_observation_space.shape).prod(),
-        #                  hidden_size=lstm_hidden_size,
-        #                  batch_first=True)
-        # self.fc1 = nn.Linear(lstm_hidden_size, 256)
-        self.fc1 = nn.Linear(np.array(env.single_observation_space.shape).prod(),256)
+        self.fc1 = nn.Linear(np.array(env.single_observation_space.shape).prod(), 256)
         self.fc2 = nn.Linear(256, 256)
-        self.fc_mu = nn.Linear(256, np.prod(env.single_action_space.shape))
+        self.fc_mean = nn.Linear(256, np.prod(env.single_action_space.shape))
+        self.fc_logstd = nn.Linear(256, np.prod(env.single_action_space.shape))
         # action rescaling
         self.register_buffer(
             "action_scale", torch.tensor((env.action_space.high - env.action_space.low) / 2.0, dtype=torch.float32)
@@ -140,13 +125,32 @@ class Actor(nn.Module):
         )
 
     def forward(self, x):
-        #CHAT GPT
-        # x, _ = self.lstm(x.unsqueeze(1))  # Unsqueeze to add a batch dimension
-        # x = F.relu(x[:, -1, :])  # Take the last time step's output
         x = F.relu(self.fc1(x))
         x = F.relu(self.fc2(x))
-        x = torch.tanh(self.fc_mu(x))
-        return x * self.action_scale + self.action_bias
+        mean = self.fc_mean(x)
+        log_std = self.fc_logstd(x)
+        log_std = torch.tanh(log_std)
+        log_std = LOG_STD_MIN + 0.5 * (LOG_STD_MAX - LOG_STD_MIN) * (log_std + 1)  # From SpinUp / Denis Yarats
+        # if(np.isnan((mean+log_std).cpu().detach().numpy()).any()):
+        #     print(x)
+        #     print(mean)
+        #     print(log_std)
+        return mean, log_std
+
+    def get_action(self, x):
+        # print(x)
+        mean, log_std = self(x)
+        std = log_std.exp()
+        normal = torch.distributions.Normal(mean, std)
+        x_t = normal.rsample()  # for reparameterization trick (mean + std * N(0,1))
+        y_t = torch.tanh(x_t)
+        action = y_t * self.action_scale + self.action_bias
+        log_prob = normal.log_prob(x_t)
+        # Enforcing Action Bound
+        log_prob -= torch.log(self.action_scale * (1 - y_t.pow(2)) + 1e-6)
+        log_prob = log_prob.sum(1, keepdim=True)
+        mean = torch.tanh(mean) * self.action_scale + self.action_bias
+        return action, log_prob, mean
 
 
 if __name__ == "__main__":
@@ -160,7 +164,6 @@ poetry run pip install "stable_baselines3==2.0.0a1"
         )
 
     args = tyro.cli(Args)
-    env_args = vars(EnvArgs())
     run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
     if args.track:
         import wandb
@@ -186,27 +189,34 @@ poetry run pip install "stable_baselines3==2.0.0a1"
     torch.manual_seed(args.seed)
     torch.backends.cudnn.deterministic = args.torch_deterministic
 
-    # device = torch.device("cuda:2" if torch.cuda.is_available() and args.cuda else "cpu")
-    env_args['device'] = device
-    # args.exploration_noise.to(device)
-    # args.policy_noise.to(device)
-    # args.noise_clip.to(device)
-    
+    device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
+
     # env setup
+    env_args = vars(EnvArgs())
+    env_args['device'] = device
     envs = gym.vector.SyncVectorEnv([make_env(args.env_id, args.seed, 0, args.capture_video, run_name, env_args)])
     assert isinstance(envs.single_action_space, gym.spaces.Box), "only continuous action space is supported"
 
+    max_action = float(envs.single_action_space.high[0])
+
     actor = Actor(envs).to(device)
-    qf1 = QNetwork(envs).to(device)
-    qf2 = QNetwork(envs).to(device)
-    qf1_target = QNetwork(envs).to(device)
-    qf2_target = QNetwork(envs).to(device)
-    target_actor = Actor(envs).to(device)
-    target_actor.load_state_dict(actor.state_dict())
+    qf1 = SoftQNetwork(envs).to(device)
+    qf2 = SoftQNetwork(envs).to(device)
+    qf1_target = SoftQNetwork(envs).to(device)
+    qf2_target = SoftQNetwork(envs).to(device)
     qf1_target.load_state_dict(qf1.state_dict())
     qf2_target.load_state_dict(qf2.state_dict())
-    q_optimizer = optim.Adam(list(qf1.parameters()) + list(qf2.parameters()), lr=args.learning_rate)
-    actor_optimizer = optim.Adam(list(actor.parameters()), lr=args.learning_rate)
+    q_optimizer = optim.Adam(list(qf1.parameters()) + list(qf2.parameters()), lr=args.q_lr)
+    actor_optimizer = optim.Adam(list(actor.parameters()), lr=args.policy_lr)
+
+    # Automatic entropy tuning
+    if args.autotune:
+        target_entropy = -torch.prod(torch.Tensor(envs.single_action_space.shape).to(device)).item()
+        log_alpha = torch.zeros(1, requires_grad=True, device=device)
+        alpha = log_alpha.exp().item()
+        a_optimizer = optim.Adam([log_alpha], lr=args.q_lr)
+    else:
+        alpha = args.alpha
 
     envs.single_observation_space.dtype = np.float32
     rb = ReplayBuffer(
@@ -222,18 +232,11 @@ poetry run pip install "stable_baselines3==2.0.0a1"
     obs, _ = envs.reset(seed=args.seed)
     for global_step in range(args.total_timesteps):
         # ALGO LOGIC: put action logic here
-        noise_factor = global_step/args.total_timesteps
         if global_step < args.learning_starts:
             actions = np.array([envs.single_action_space.sample() for _ in range(envs.num_envs)])
         else:
-            with torch.no_grad():
-                # #CHAT GPT
-                # # Unsqueeze to add a time dimension for LSTM input
-                # obs_with_time = torch.Tensor(obs).unsqueeze(0).unsqueeze(1).to(device)
-                # actions = actor(obs_with_time)
-                actions = actor(torch.Tensor(obs).to(device))
-                actions += torch.normal(0, actor.action_scale * args.exploration_noise * noise_factor)
-                actions = actions.cpu().numpy().clip(envs.single_action_space.low, envs.single_action_space.high)
+            actions, _, _ = actor.get_action(torch.Tensor(obs).to(device))
+            actions = actions.detach().cpu().numpy()
 
         # TRY NOT TO MODIFY: execute the game and log data.
         next_obs, rewards, terminations, truncations, infos = envs.step(actions)
@@ -259,59 +262,55 @@ poetry run pip install "stable_baselines3==2.0.0a1"
         # ALGO LOGIC: training.
         if global_step > args.learning_starts:
             data = rb.sample(args.batch_size)
+            # print(data.observations)
             with torch.no_grad():
-                
-                # #CHAT GPT
-                
-                # # Unsqueeze to add a time dimension for LSTM input
-                # data_observations = data.observations.unsqueeze(1)
-                # data_next_observations = data.next_observations.unsqueeze(1)
-                
-                clipped_noise = (torch.randn_like(data.actions, device=device) * args.policy_noise).clamp(
-                    -args.noise_clip, args.noise_clip
-                ) * target_actor.action_scale * noise_factor
-
-                next_state_actions = (target_actor(data.next_observations) + clipped_noise).clamp(
-                    envs.single_action_space.low[0], envs.single_action_space.high[0]
-                )
-                
+                next_state_actions, next_state_log_pi, _ = actor.get_action(data.next_observations)
                 qf1_next_target = qf1_target(data.next_observations, next_state_actions)
                 qf2_next_target = qf2_target(data.next_observations, next_state_actions)
-                min_qf_next_target = torch.min(qf1_next_target, qf2_next_target)
+                min_qf_next_target = torch.min(qf1_next_target, qf2_next_target) - alpha * next_state_log_pi
                 next_q_value = data.rewards.flatten() + (1 - data.dones.flatten()) * args.gamma * (min_qf_next_target).view(-1)
-                # print(next_q_value)
 
-            # #CHAT GPT
-            # # Unsqueeze to add a time dimension for LSTM input
-            # data_observations = data.observations.unsqueeze(1)
             qf1_a_values = qf1(data.observations, data.actions).view(-1)
             qf2_a_values = qf2(data.observations, data.actions).view(-1)
             qf1_loss = F.mse_loss(qf1_a_values, next_q_value)
-            if np.isinf(qf1_loss.cpu().detach().numpy()).any():
-                qf1_loss = F.l1_loss(qf1_a_values, next_q_value)
             qf2_loss = F.mse_loss(qf2_a_values, next_q_value)
-            if np.isinf(qf2_loss.cpu().detach().numpy()).any():
-                qf2_loss = F.l1_loss(qf1_a_values, next_q_value)
             qf_loss = qf1_loss + qf2_loss
 
             # optimize the model
             q_optimizer.zero_grad()
             qf_loss.backward()
+            # torch.nn.utils.clip_grad_norm_(list(qf1.parameters()) + list(qf2.parameters()), args.clip)
             q_optimizer.step()
 
-            if global_step % args.policy_frequency == 0:
-                # #CHAT GPT
-                # # Unsqueeze to add a time dimension for LSTM input
-                # data_observations = data.observations.unsqueeze(1)
-                
-                actor_loss = -qf1(data.observations, actor(data.observations)).mean()
-                actor_optimizer.zero_grad()
-                actor_loss.backward()
-                actor_optimizer.step()
+            if global_step % args.policy_frequency == 0:  # TD 3 Delayed update support
+                for _ in range(
+                    args.policy_frequency
+                ):  # compensate for the delay by doing 'actor_update_interval' instead of 1
+                    pi, log_pi, _ = actor.get_action(data.observations)
+                    qf1_pi = qf1(data.observations, pi)
+                    qf2_pi = qf2(data.observations, pi)
+                    min_qf_pi = torch.min(qf1_pi, qf2_pi)
+                    actor_loss = ((alpha * log_pi) - min_qf_pi).mean()
 
-                # update the target network
-                for param, target_param in zip(actor.parameters(), target_actor.parameters()):
-                    target_param.data.copy_(args.tau * param.data + (1 - args.tau) * target_param.data)
+                    actor_optimizer.zero_grad()
+                    actor_loss.backward()
+                    # torch.nn.utils.clip_grad_norm_(list(actor.parameters()), args.clip)
+                    actor_optimizer.step()
+
+                    if args.autotune:
+                        # print(data.observations)
+                        with torch.no_grad():
+                            _, log_pi, _ = actor.get_action(data.observations)
+                        alpha_loss = (-log_alpha.exp() * (log_pi + target_entropy)).mean()
+
+                        a_optimizer.zero_grad()
+                        alpha_loss.backward()
+                        # torch.nn.utils.clip_grad_norm_([log_alpha], args.clip)
+                        a_optimizer.step()
+                        alpha = log_alpha.exp().item()
+
+            # update the target networks
+            if global_step % args.target_network_frequency == 0:
                 for param, target_param in zip(qf1.parameters(), qf1_target.parameters()):
                     target_param.data.copy_(args.tau * param.data + (1 - args.tau) * target_param.data)
                 for param, target_param in zip(qf2.parameters(), qf2_target.parameters()):
@@ -324,34 +323,11 @@ poetry run pip install "stable_baselines3==2.0.0a1"
                 writer.add_scalar("losses/qf2_loss", qf2_loss.item(), global_step)
                 writer.add_scalar("losses/qf_loss", qf_loss.item() / 2.0, global_step)
                 writer.add_scalar("losses/actor_loss", actor_loss.item(), global_step)
+                writer.add_scalar("losses/alpha", alpha, global_step)
                 print("SPS:", int(global_step / (time.time() - start_time)))
                 writer.add_scalar("charts/SPS", int(global_step / (time.time() - start_time)), global_step)
-
-    if args.save_model:
-        model_path = f"runs/{run_name}/{args.exp_name}.cleanrl_model"
-        torch.save((actor.state_dict(), qf1.state_dict(), qf2.state_dict()), model_path)
-        print(f"model saved to {model_path}")
-        from sad_nns.utils.cleanrl.evals.td3_eval import evaluate
-
-        episodic_returns = evaluate(
-            model_path,
-            make_env,
-            args.env_id,
-            eval_episodes=10,
-            run_name=f"{run_name}-eval",
-            Model=(Actor, QNetwork),
-            device=device,
-            exploration_noise=0,#args.exploration_noise,
-        )
-        for idx, episodic_return in enumerate(episodic_returns):
-            writer.add_scalar("eval/episodic_return", episodic_return, idx)
-
-        # if args.upload_model:
-        #     from sad_nns.utils.cleanrl.huggingface import push_to_hub
-
-        #     repo_name = f"{args.env_id}-{args.exp_name}-seed{args.seed}"
-        #     repo_id = f"{args.hf_entity}/{repo_name}" if args.hf_entity else repo_name
-        #     push_to_hub(args, episodic_returns, repo_id, "TD3", f"runs/{run_name}", f"videos/{run_name}-eval")
+                if args.autotune:
+                    writer.add_scalar("losses/alpha_loss", alpha_loss.item(), global_step)
 
     envs.close()
     writer.close()
