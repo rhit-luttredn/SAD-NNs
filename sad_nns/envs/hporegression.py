@@ -440,6 +440,8 @@ class Regression_Env_no_time(gym.Env):
             observation["valid loss"] = 0
         if any(np.isnan(val) for val in observation.values()):
             print(observation)
+        if any(np.isinf(val) for val in observation.values()):
+            print(observation)
         return observation
         
     def _get_info(self):
@@ -548,7 +550,7 @@ class Regression_Env_no_time(gym.Env):
         troublemakers = [self.train_loss, self.valid_loss]
         if np.isnan(troublemakers).any() or np.isinf(troublemakers).any():
             observation = self._get_observation()
-            reward = -1.5
+            reward = -2*(self.max_epoch-self.epoch)
             done = True
             info = self._get_info()
             # print(observation, reward, done, False, info)
@@ -590,7 +592,7 @@ class Regression_Env_no_time(gym.Env):
         troublemakers = [self.train_loss, self.valid_loss]
         if np.isnan(troublemakers).any() or np.isinf(troublemakers).any():
             observation = self._get_observation()
-            reward = -1.5
+            reward = -2*(self.max_epoch-self.epoch)
             done = True
             info = self._get_info()
             # print(observation, reward, done, False, info)

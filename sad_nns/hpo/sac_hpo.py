@@ -38,7 +38,7 @@ class Args:
     # Algorithm specific arguments
     env_id: str = "RegressionEnv-v1"
     """the environment id of the task"""
-    total_timesteps: int = 20_000
+    total_timesteps: int = 100_000
     """total timesteps of the experiments"""
     buffer_size: int = int(1e6)
     """the replay memory buffer size"""
@@ -98,11 +98,15 @@ class SoftQNetwork(nn.Module):
         self.fc3 = nn.Linear(256, 1)
 
     def forward(self, x, a):
-        x = torch.cat([x, a], 1)
-        x = F.relu(self.fc1(x))
-        x = F.relu(self.fc2(x))
-        x = self.fc3(x)
-        return x
+        x0 = F.tanh(torch.cat([x, a], 1))
+        x1 = F.relu(self.fc1(x0))
+        x2 = F.relu(self.fc2(x1))
+        x3 = self.fc3(x2)
+        x4 = x3.cpu().detach().numpy()
+        if np.isnan(x4).any() or np.isinf(x4).any():
+            print(x0,x1,x2,x3)
+            # raise Exception("inf/nan q")
+        return x3
 
 
 LOG_STD_MAX = 2
@@ -125,18 +129,20 @@ class Actor(nn.Module):
         )
 
     def forward(self, x0):
-        x1 = F.relu(self.fc1(x0))
+        x1 = F.relu(self.fc1(F.tanh(x0)))
         x2 = F.relu(self.fc2(x1))
         mean = self.fc_mean(x2)
         log_std = self.fc_logstd(x2)
         log_std = torch.tanh(log_std)
         log_std = LOG_STD_MIN + 0.5 * (LOG_STD_MAX - LOG_STD_MIN) * (log_std + 1)  # From SpinUp / Denis Yarats
-        if(np.isnan((mean+log_std).cpu().detach().numpy()).any()):
+        t = (mean+log_std).cpu().detach().numpy()
+        if(np.isnan(t).any() or np.isinf(t).any()):
             print(x0) 
             print(x1)
             print(x2)
             print(mean)
             print(log_std)
+            # raise Exception("Inf/nan values")
         return mean, log_std
 
     def get_action(self, x):
@@ -311,6 +317,7 @@ poetry run pip install "stable_baselines3==2.0.0a1"
                         # torch.nn.utils.clip_grad_norm_([log_alpha], args.clip)
                         a_optimizer.step()
                         alpha = log_alpha.exp().item()
+                        # print("alpha:", alpha)
 
             # update the target networks
             if global_step % args.target_network_frequency == 0:
