@@ -4,8 +4,11 @@ import os
 import random
 import time
 from dataclasses import dataclass
+from functools import reduce
+from operator import mul
 
 import gymnasium as gym
+import neurops
 import numpy as np
 import sad_nns.envs
 import torch
@@ -14,36 +17,9 @@ import torch.optim as optim
 import tyro
 from gymnasium.vector import VectorEnv
 from minigrid.wrappers import ImgObsWrapper
+from neurops import NORTH_score
 from torch.distributions.categorical import Categorical
 from torch.utils.tensorboard import SummaryWriter
-
-
-@dataclass
-class EnvArgs:
-    size: int|None = 10
-    """the height and width of the environment"""
-    width: int|None = None
-    """the width of the environment"""
-    height: int|None = None
-    """the height of the environment"""
-    agent_start_pos: tuple|None = None
-    """the starting position of the agent"""
-    agent_start_dir: int = 0
-    """the starting direction of the agent"""
-    max_steps: int|None = None
-    """the maximum number of steps before the environment is terminated"""
-    see_through_walls: bool = True
-    """whether the agent can see through walls"""
-
-    wall_density: int = 0.5
-    use_lava: bool = False
-
-    # wall_freq: int = 2
-    # """FOR HARDWALL: the number of tiles between walls"""
-    # use_lava: bool = False
-    # """FOR HARDWALL: whether to use lava"""
-    # lock_doors: bool = False
-    # """FOR HARDWALL: whether to lock doors"""
 
 
 @dataclass
@@ -56,23 +32,22 @@ class Args:
     """if toggled, `torch.backends.cudnn.deterministic=False`"""
     cuda: bool = True
     """if toggled, cuda will be enabled by default"""
-    gpu_idx: int = 0
-    """set the default gpu to use for the experiment"""
     track: bool = False
     """if toggled, this experiment will be tracked with Weights and Biases"""
     wandb_project_name: str = "cleanRL"
     """the wandb's project name"""
-    wandb_entity: str|None = None
+    wandb_entity: str = None
     """the entity (team) of wandb's project"""
-    capture_video: bool = True
+    capture_video: bool = False
     """whether to capture videos of the agent performances (check out `videos` folder)"""
-    save_model: bool = True
+    save_model: bool = False
     """whether to save model into the `runs/{run_name}` folder"""
 
     # Algorithm specific arguments
-    env_id: str = "MineFieldEnv-v0"
+    env_id: str = "SimpleEnv-v0"
+    # env_id: str = "BreakoutNoFrameskip-v4"
     """the id of the environment"""
-    total_timesteps: int = 100_000
+    total_timesteps: int = 15_000
     """total timesteps of the experiments"""
     learning_rate: float = 2.5e-4
     """the learning rate of the optimizer"""
@@ -102,8 +77,20 @@ class Args:
     """coefficient of the value function"""
     max_grad_norm: float = 0.5
     """the maximum norm for the gradient clipping"""
-    target_kl: float|None = None
+    target_kl: float = None
     """the target KL divergence threshold"""
+
+    # NORTH specific arguments
+    growth: bool = True
+    """if toggled, the network will grow"""
+    iterations_to_grow: int = 1
+    """the grow the network every n iterations"""
+    threshold: float = 0.005
+    """the threshold to grow the network"""
+
+    # Environment specific arguments
+    env_size: int = 10
+    """the height and width of the environment"""
 
     # to be filled in runtime
     batch_size: int = 0
@@ -112,7 +99,7 @@ class Args:
     """the mini-batch size (computed in runtime)"""
     num_iterations: int = 0
     """the number of iterations (computed in runtime)"""
-    env_kwargs: dict|None = None
+    env_kwargs: dict = None
     """the additional kwargs to pass to the gym environment (computed in runtime)"""
 
 
@@ -142,7 +129,6 @@ class Agent(nn.Module):
         height = envs.single_observation_space.shape[0]
         width = envs.single_observation_space.shape[1]
         n_input_channels = envs.single_observation_space.shape[2]
-        self.dropout_layers = []
 
         conv_layers = nn.Sequential(
             layer_init(nn.Conv2d(n_input_channels, 16, 2, padding=1)),
@@ -151,34 +137,42 @@ class Agent(nn.Module):
             nn.ReLU(),
             layer_init(nn.Conv2d(32, 64, 2, padding=1)),
             nn.ReLU(),
+            nn.Flatten(),
         )
 
         # Calculate the size of the output of the conv_layers by doing one forward pass
         dummy_input = torch.randn(1, n_input_channels, height, width)
         output = conv_layers(dummy_input)
-        output_size = output.shape[1] * output.shape[2] * output.shape[3]
+        conv_out_shape = reduce(mul, output.shape, 1)
 
-        self.network = nn.Sequential( 
-            conv_layers,
-            nn.Flatten(),
-            nn.Linear(output_size, 512),
-            nn.ReLU(),
-            self._make_dropout(0.5),
-            nn.Linear(512, 512),
-            nn.ReLU(),
-            self._make_dropout(0.5),
-            nn.Linear(512, 512),
-            nn.ReLU(),
-            self._make_dropout(0.5),
+        self.growth_net = neurops.ModSequential(
+            layer_init(neurops.ModLinear(conv_out_shape, 512)),
+            layer_init(neurops.ModLinear(512, 256)),
+            layer_init(neurops.ModLinear(256, 128, nonlinearity="")),
+            track_activations=True,
+            track_auxiliary_gradients=True,
+            input_shape = (conv_out_shape)
         )
 
-        self.actor = layer_init(nn.Linear(512, envs.single_action_space.n), std=0.01)
-        self.critic = layer_init(nn.Linear(512, 1), std=1)
-    
-    def _make_dropout(self, p: float):
-        dropout = nn.Dropout(p)
-        self.dropout_layers.append(dropout)
-        return dropout
+        # for saving activations
+        self.activation = {}
+        def get_activation(name):
+            def hook(model, input, output):
+                self.activation[name] = output.detach()
+            return hook
+
+        # manual save of activation
+        for i in range(len(self.growth_net)):
+            self.growth_net[i].register_forward_hook(get_activation(str(i)))
+
+        self.network = nn.Sequential(
+            conv_layers,
+            self.growth_net,
+            nn.ReLU(),
+        )
+
+        self.actor = layer_init(nn.Linear(128, envs.single_action_space.n), std=0.01)
+        self.critic = layer_init(nn.Linear(128, 1), std=1)
 
     def get_value(self, x):
         x = x.permute(0, 3, 1, 2)
@@ -193,96 +187,17 @@ class Agent(nn.Module):
             action = probs.sample()
         return action, probs.log_prob(action), probs.entropy(), self.critic(hidden)
 
-    def enable_dropout(self):
-        for layer in self.dropout_layers:
-            layer.train()
-    
-    def disable_dropout(self):
-        for layer in self.dropout_layers:
-            layer.eval()
-
-
-def get_monte_carlo_predictions(envs: VectorEnv, agent: Agent, forward_passes: int, eval_episodes: int, device: torch.device = 1):
-    """ Function to get the monte-carlo samples and uncertainty estimates
-    through multiple forward passes
-
-    Parameters
-    ----------
-    envs : VectorEnv
-        vectorized environment
-    model : Agent
-        model to be used for prediction
-    forward_passes : int
-        number of monte-carlo samples/forward passes
-    eval_episodes : int
-        number of episodes to evaluate the model
-    device : torch.device
-        device to be used for computation
-    """
-    n_samples = envs.num_envs
-    n_classes = envs.single_action_space.n
-
-    dropout_predictions = np.empty((0, n_samples, n_classes))
-    softmax = nn.Softmax(dim=1)
-    # for i in range(forward_passes):
-    #     predictions = np.empty((0, n_classes))
-    #     agent.eval()
-    #     agent.enable_dropout()
-    #     for i, (image, label) in enumerate(data_loader):
-    #         image = image.to(torch.device('cuda'))
-    #         with torch.no_grad():
-    #             output = agent(image)
-    #             output = softmax(output)  # shape (n_samples, n_classes)
-    #         predictions = np.vstack((predictions, output.cpu().numpy()))
-
-    #     dropout_predictions = np.vstack((dropout_predictions,
-    #                                      predictions[np.newaxis, :, :]))
-    #     # dropout predictions - shape (forward_passes, n_samples, n_classes)
-
-    agent.eval()
-    obs, _ = envs.reset()
-    
-    # MC Dropout
-    agent.enable_dropout()
-    for i in range(forward_passes):
-        actions, _, _, _ = agent.get_action_and_value(torch.Tensor(obs).to(device))
-
-
-    agent.disable_dropout()
-    actions, _, _, _ = agent.get_action_and_value(torch.Tensor(obs).to(device))
-    next_obs, _, _, _, infos = envs.step(actions.cpu().numpy())
-    if "final_info" in infos:
-        for info in infos["final_info"]:
-            if "episode" not in info:
-                continue
-            print(f"eval_episode={len(episodic_returns)}, episodic_return={info['episode']['r']}")
-            episodic_returns += [info["episode"]["r"]]
-    obs = next_obs
-
-    # Calculating mean across multiple MCD forward passes 
-    mean = np.mean(dropout_predictions, axis=0)  # shape (n_samples, n_classes)
-
-    # Calculating variance across multiple MCD forward passes
-    variance = np.var(dropout_predictions, axis=0)  # shape (n_samples, n_classes)
-
-    epsilon = sys.float_info.min
-    # Calculating entropy across multiple MCD forward passes
-    entropy = -np.sum(mean * np.log(mean + epsilon), axis=-1)  # shape (n_samples,)
-
-    # Calculating mutual information across multiple MCD forward passes 
-    mutual_info = entropy - np.mean(np.sum(-dropout_predictions * np.log(dropout_predictions + epsilon),
-                                           axis=-1), axis=0)  # shape (n_samples,)
-
 
 if __name__ == "__main__":
     args = tyro.cli(Args)
-    env_args = vars(EnvArgs())
     args.batch_size = int(args.num_envs * args.num_steps)
     args.minibatch_size = int(args.batch_size // args.num_minibatches)
     args.num_iterations = args.total_timesteps // args.batch_size
+    args.env_kwargs = {"size": args.env_size}
     run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
     if args.track:
         import wandb
+
         wandb.init(
             project=args.wandb_project_name,
             entity=args.wandb_entity,
@@ -305,12 +220,10 @@ if __name__ == "__main__":
     torch.backends.cudnn.deterministic = args.torch_deterministic
 
     device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
-    if args.cuda and torch.cuda.is_available():
-        torch.cuda.set_device(args.gpu_idx)
 
     # env setup
     envs = gym.vector.SyncVectorEnv(
-        [make_env(args.env_id, i, args.capture_video, run_name, env_kwargs=env_args) for i in range(args.num_envs)],
+        [make_env(args.env_id, i, args.capture_video, run_name, env_kwargs=args.env_kwargs) for i in range(args.num_envs)],
     )
     assert isinstance(envs.single_action_space, gym.spaces.Discrete), "only discrete action space is supported"
 
@@ -331,6 +244,7 @@ if __name__ == "__main__":
     next_obs, _ = envs.reset(seed=args.seed)
     next_obs = torch.Tensor(next_obs).to(device)
     next_done = torch.zeros(args.num_envs).to(device)
+    initial_scores = []
 
     for iteration in range(1, args.num_iterations + 1):
         # Annealing the rate if instructed to do so.
@@ -458,6 +372,25 @@ if __name__ == "__main__":
         print("SPS:", int(global_step / (time.time() - start_time)))
         writer.add_scalar("charts/SPS", int(global_step / (time.time() - start_time)), global_step)
 
+        # NORTH Growing
+        if iteration % args.iterations_to_grow == 0:
+            print(iteration)
+            for i in range(len(agent.growth_net)-1):
+                # print("The size of activation of layer {}: {}".format(i, agent.growth_net.activations[str(i)].shape))
+                # print("The size of my activation of layer {}: {}".format(i, activation[str(i)].shape))
+                #score = orthogonality_gap(agent.growth_net.activations[str(i)])
+                max_rank = agent.growth_net[i].width()
+                # score = NORTH_score(agent.growth_net.activations[str(i)], batchsize=batch_size)
+                score = NORTH_score(agent.activation[str(i)], batchsize=args.batch_size, threshold=args.threshold)
+                # score = NORTH_score(agent.growth_net[i].weight, batchsize=batch_size)
+                if iteration == args.iterations_to_grow:
+                    initial_scores.append(score)
+                initScore = 0.97 * initial_scores[i]
+                to_add = max(0, int(agent.growth_net[i].weight.size()[0] * (score - initScore)))
+                print("Layer {} score: {}/{}, neurons to add: {}".format(i, score, max_rank, to_add))
+
+                agent.growth_net.grow(i, to_add, fanin_weights="kaiming_uniform", optimizer=optimizer)
+
     if args.save_model:
         model_path = f"../runs/{run_name}/{args.exp_name}.model"
         torch.save(agent.state_dict(), model_path)
@@ -472,8 +405,8 @@ if __name__ == "__main__":
             run_name=f"{run_name}-eval",
             Model=Agent,
             device=device,
-            capture_video=True,
-            env_kwargs=env_args
+            capture_video=False,
+            env_kwargs=args.env_kwargs
         )
         for idx, episodic_return in enumerate(episodic_returns):
             writer.add_scalar("eval/episodic_return", episodic_return, idx)
