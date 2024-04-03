@@ -18,7 +18,7 @@ def evaluate(
     capture_video: bool = True,
     env_kwargs: dict = {},
 ):
-    envs = gym.vector.SyncVectorEnv([make_env(env_id, 0, 0, capture_video, run_name, env_kwargs=env_kwargs)])
+    envs = gym.vector.SyncVectorEnv([make_env(env_id, 0, capture_video, run_name, env_kwargs=env_kwargs)])
     model = Model(envs).to(device)
     model.load_state_dict(torch.load(model_path, map_location=device))
     model.eval()
