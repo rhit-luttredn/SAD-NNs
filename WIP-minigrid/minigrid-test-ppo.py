@@ -31,7 +31,7 @@ from torch.utils.tensorboard import SummaryWriter
 class Args:
     exp_name: str = os.path.basename(__file__)[: -len(".py")]
     """the name of this experiment"""
-    seed: int = 1
+    seed: int = 0
     """seed of the experiment"""
     torch_deterministic: bool = True
     """if toggled, `torch.backends.cudnn.deterministic=False`"""
@@ -47,15 +47,15 @@ class Args:
     """whether to capture videos of the agent performances (check out `videos` folder)"""
 
     # Algorithm specific arguments
-    env_id: str = "MineFieldEnv-v0"
+    env_id: str = "WallEnv-v0"
     """the id of the environment"""
-    total_timesteps: int = 50_000
+    total_timesteps: int = 15_000 # 50_000
     """total timesteps of the experiments"""
     learning_rate: float = 2.5e-4
     """the learning rate of the optimizer"""
     num_envs: int = 8
     """the number of parallel game environments"""
-    num_steps: int = 256
+    num_steps: int = 128 # 256 
     """the number of steps to run in each environment per policy rollout"""
     anneal_lr: bool = True
     """Toggle learning rate annealing for policy and value networks"""
@@ -92,9 +92,9 @@ class Args:
     # linear_sizes: list = field(default_factory=lambda: [64])
     linear_sizes: list = field(default_factory=lambda: [(8, 16, 32), (16, 32, 64), (32, 64, 128)])
     """the possible output sizes for the each linear layers. Each tuple is a set for one layer"""
-    u_training_loops: int = 10
+    u_training_loops: int = 1
     """the number of independent training loops for each experiment"""
-    training_loops: int = 5
+    training_loops: int = 1
     """the number of times to train each agent"""
     max_architectures: int = None
     """the total number of architectures to test"""
@@ -102,7 +102,7 @@ class Args:
     """the total number of seeds to run for each architecture"""
 
     # Environment specific arguments
-    env_size: int = 10
+    env_size: int = 6
     """the size of the environment"""
     wall_density: float = 0.8
     use_lava: bool = False
@@ -466,7 +466,7 @@ def main():
     start_time = time.time()
     model_rewards = []
     # for i, linear_sizes in enumerate(architectures):
-    for seed in range(args.num_seeds + 1):
+    for seed in range(args.num_seeds):
         # print(f'Iteration {i}/{len(architectures) - 1}')
         print(f'Seed {seed}/{args.num_seeds - 1}')
 
@@ -478,8 +478,8 @@ def main():
         #     "out_features": args.output_features,
         # }
         model_kwargs = {
-            "conv_sizes": [8, 16, 32],
-            "linear_sizes": [512, 256, 128],
+            "conv_sizes": [16, 32, 64],
+            "linear_sizes": [131, 140, 128],
             "out_features": args.output_features,
         }
         
@@ -488,8 +488,8 @@ def main():
         initial_model = PPOAgent(envs, **model_kwargs).to(device)
 
         # at the last seed run custom initialization
-        if seed == args.num_seeds:
-            custom_init(initial_model)
+        # if seed == args.num_seeds:
+        #     custom_init(initial_model)
 
         optimizer = optim.Adam(initial_model.parameters(), lr=args.learning_rate, eps=1e-5)
 
@@ -512,7 +512,7 @@ def main():
             
             for _ in range(args.training_loops):
                 print("Training...")
-                writer = SummaryWriter(f"../runs/model_div6/{run_name}/model-{seed}")
+                writer = SummaryWriter(f"../runs7/{run_name}/model-{seed}")
                 writer.add_text(
                     "hyperparameters",
                     "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])),
@@ -522,7 +522,7 @@ def main():
 
             # Test the model
             print("Testing...")
-            model_path = f"../runs/model_div6/{run_name}/model-{seed}/{args.exp_name}.model"
+            model_path = f"../runs7/{run_name}/model-{seed}/{args.exp_name}.model"
             torch.save(agent.state_dict(), model_path)
             print(f"model {seed} saved to {model_path}")
 
@@ -560,7 +560,7 @@ def main():
 
     envs.close()
 
-    df.to_csv(f"../runs/model_div6/{run_name}/results.csv", index=False)
+    df.to_csv(f"../runs7/{run_name}/results.csv", index=False)
 
     # fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(20, 6))
 
