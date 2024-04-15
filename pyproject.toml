@@ -28,6 +28,7 @@ torchinfo = "^1.8.0"
 gymnasium = "^0.29.1"
 moviepy = "^1.0.3"
 isort = "^5.13.2"
+statsmodels = "^0.14.1"
 
 [build-system]
 requires = ["poetry-core"]
