@@ -8,7 +8,9 @@ from dataclasses import dataclass
 from operator import mul
 
 import gymnasium as gym
+import neurops
 import numpy as np
+import pandas as pd
 import sad_nns.envs
 import torch
 import torch.nn as nn
@@ -16,6 +18,7 @@ import torch.optim as optim
 import tyro
 from gymnasium.vector import VectorEnv
 from minigrid.wrappers import ImgObsWrapper, FullyObsWrapper, ActionBonus
+from neurops import NORTH_score, weight_sum
 from sad_nns.envs.wrappers import FullyObsRotatingWrapper
 from stable_baselines3.common.buffers import ReplayBuffer
 from torch.nn import functional as F
@@ -58,17 +61,17 @@ class Args:
     """seed of the experiment"""
     torch_deterministic: bool = True
     """if toggled, `torch.backends.cudnn.deterministic=False`"""
-    cuda: bool = True
+    cuda: bool = False
     """if toggled, cuda will be enabled by default"""
     device: int|None = 6
     """the GPU device to use"""
-    track: bool = True
+    track: bool = False
     """if toggled, this experiment will be tracked with Weights and Biases"""
-    wandb_project_name: str = "uncertainty-estimation-3"
+    wandb_project_name: str = "uncertainty-estimation"
     """the wandb's project name"""
     wandb_entity: str = 'sad-nns'
     """the entity (team) of wandb's project"""
-    capture_video: bool = True
+    capture_video: bool = False
     """whether to capture videos of the agent performances (check out `videos` folder)"""
     save_model: bool = True
     """whether to save model into the `runs/{run_name}` folder"""
@@ -84,7 +87,7 @@ class Args:
     """the learning rate of the optimizer"""
     num_envs: int = 1
     """the number of parallel game environments"""
-    buffer_size: int = 100_000
+    buffer_size: int = 50_000
     """the replay memory buffer size"""
     gamma: float = 0.99
     """the discount factor gamma"""
@@ -92,7 +95,7 @@ class Args:
     """the target network update rate"""
     target_network_frequency: int = 500
     """the timesteps it takes to update the target network"""
-    batch_size: int = 32
+    batch_size: int = 128
     """the batch size of sample from the replay memory"""
     start_e: float = 1
     """the starting epsilon for exploration"""
@@ -107,12 +110,28 @@ class Args:
     dropout_frequency: int = 2000
     """the frequency of dropout"""
 
+    # NORTH specific arguments
+    growth: bool = True
+    """if toggled, the network will grow"""
+    steps_to_grow: int = 5000
+    """the grow the network every n steps"""
+    iterations_to_grow: int = 10
+    """the grow the network every n iterations"""
+    threshold: float = 0.000
+    """the threshold to grow the network"""
+    upper_bound_mult: int = 2
+    """the multiplier used to determine the upper bound of growth for each layer"""
+
+    # Model specific arguments
+    # linear_sizes: list = [256, 256, 128]
+    # """the hidden sizes of the fully connected layers"""
+
 
 def make_env(env_id, idx, capture_video, run_name, env_kwargs: dict = {}):
     def thunk():
         if capture_video and idx == 0:
             env = gym.make(env_id, render_mode="rgb_array", **env_kwargs)
-            env = gym.wrappers.RecordVideo(env, f"../videos/{run_name}")
+            env = gym.wrappers.RecordVideo(env, f"../videos/dqn-north-uncertainty/{run_name}")
         else:
             env = gym.make(env_id, **env_kwargs)
         # env = FullyObsRotatingWrapper(env)
@@ -124,12 +143,12 @@ def make_env(env_id, idx, capture_video, run_name, env_kwargs: dict = {}):
 
 
 class QNetwork(nn.Module):
-    def __init__(self, envs: VectorEnv):
+    def __init__(self, envs: VectorEnv, linear_sizes = []):
+        assert len(linear_sizes) > 0, "There must be at least one linear layer"
         super().__init__()
         height = envs.single_observation_space.shape[0]
         width = envs.single_observation_space.shape[1]
         n_input_channels = envs.single_observation_space.shape[2]
-        self.dropout_layers = []
 
         conv_layers = nn.Sequential(
             nn.Conv2d(n_input_channels, 16, 8, padding=1),
@@ -145,34 +164,72 @@ class QNetwork(nn.Module):
         output = conv_layers(dummy_input)
         output_size = np.prod(output.shape)
 
+        # self.network = nn.Sequential(
+        #     conv_layers,
+        #     nn.Flatten(),
+        #     nn.Linear(output_size, 512),
+        #     nn.ReLU(),
+        #     self._make_dropout(0.5),
+        #     nn.Linear(512, 512),
+        #     nn.ReLU(),
+        #     self._make_dropout(0.5),
+        #     nn.Linear(512, envs.single_action_space.n),
+        # )
+
+        linear_sizes = [output_size] + linear_sizes + [envs.single_action_space.n]
+        linear_layers = []
+        for i in range(len(linear_sizes) - 1):
+            nonlinearity = "relu" if i < len(linear_sizes) - 2 else ""
+            linear_layers.append(neurops.ModLinear(linear_sizes[i], linear_sizes[i + 1], 
+                                                   predropout=True, nonlinearity=nonlinearity))
+
+        self.growth_net = neurops.ModSequential(
+            *linear_layers,
+            track_activations=True,
+            track_auxiliary_gradients=True,
+            input_shape = (output_size)
+        )
+
+        # self.growth_net = neurops.ModSequential(
+        #     neurops.ModLinear(output_size, linear_sizes[0], predropout=True),
+        #     neurops.ModLinear(linear_sizes[0], linear_sizes[1], predropout=True),
+        #     neurops.ModLinear(linear_sizes[1], linear_sizes[2], predropout=True),
+        #     neurops.ModLinear(linear_sizes[2], envs.single_action_space.n, predropout=True, nonlinearity=""),
+        #     track_activations=True,
+        #     track_auxiliary_gradients=True,
+        #     input_shape = (output_size)
+        # )
+
+        # for saving activations
+        self.activation = {}
+        def get_activation(name):
+            def hook(model, input, output):
+                self.activation[name] = output.detach()
+            return hook
+
+        # manual save of activation
+        for i in range(len(self.growth_net)):
+            self.growth_net[i].register_forward_hook(get_activation(str(i)))
+
         self.network = nn.Sequential(
             conv_layers,
             nn.Flatten(),
-            nn.Linear(output_size, 512),
-            nn.ReLU(),
-            self._make_dropout(0.5),
-            nn.Linear(512, 512),
-            nn.ReLU(),
-            self._make_dropout(0.5),
-            nn.Linear(512, envs.single_action_space.n),
+            self.growth_net,
         )
-
-    def _make_dropout(self, p: float):
-        dropout = nn.Dropout(p)
-        self.dropout_layers.append(dropout)
-        return dropout
 
     def forward(self, x):
         x = x.permute(0, 3, 1, 2)
         return self.network(x / 255.0)
 
     def enable_dropout(self):
-        for layer in self.dropout_layers:
-            layer.train()
+        for layer in self.growth_net:
+            if isinstance(layer, neurops.ModLinear):
+                layer.predropout.train()
 
     def disable_dropout(self):
-        for layer in self.dropout_layers:
-            layer.eval()
+        for layer in self.growth_net:
+            if isinstance(layer, neurops.ModLinear):
+                layer.predropout.eval()
 
 
 def linear_schedule(start_e: float, end_e: float, duration: int, t: int):
@@ -307,7 +364,7 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
             monitor_gym=True,
             save_code=True,
         )
-    writer = SummaryWriter(f"../runs/{run_name}")
+    writer = SummaryWriter(f"../runs/dqn-north-uncertainty/{run_name}")
     writer.add_text(
         "hyperparameters",
         "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])),
@@ -319,7 +376,7 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
     torch.manual_seed(args.seed)
     torch.backends.cudnn.deterministic = args.torch_deterministic
 
-    device = torch.device("cuda", args.device if torch.cuda.is_available() and args.cuda else "cpu")
+    device = torch.device(("cuda", args.device) if torch.cuda.is_available() and args.cuda else "cpu")
 
     # env setup
     def make_envs_thunk(capture_video=args.capture_video):
@@ -333,9 +390,25 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
     envs = make_envs_thunk()
     assert isinstance(envs.single_action_space, gym.spaces.Discrete), "only discrete action space is supported"
 
-    q_network = QNetwork(envs).to(device)
+    # df = pd.DataFrame(
+    #     columns=[
+    #         "# Total Parameters", 
+    #         "# Total Neurons", 
+    #         "Model Summary", 
+    #         "Environment", 
+    #         "Size",
+    #         "Seed",
+    #         "Density",
+    #         "Average Test Reward"
+    #     ])
+    
+    model_kwargs = {
+        "linear_sizes": [256, 256, 128] #args.linear_sizes
+    }
+
+    q_network = QNetwork(envs, **model_kwargs).to(device)
     optimizer = optim.Adam(q_network.parameters(), lr=args.learning_rate)
-    target_network = QNetwork(envs).to(device)
+    target_network = QNetwork(envs, **model_kwargs).to(device)
     target_network.load_state_dict(q_network.state_dict())
 
     rb = ReplayBuffer(
@@ -347,6 +420,18 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
         handle_timeout_termination=False,
     )
     start_time = time.time()
+
+    iteration = 0
+
+    # NORTH Setup
+    initial_scores = []
+
+    # determine upper bound on growth
+    upper_bounds = []
+    for i in range(len(q_network.growth_net)-1):
+        layer_width = q_network.growth_net[i].width() * args.upper_bound_mult
+        print(f'Layer Width: {layer_width}')
+        upper_bounds.append(layer_width)
 
     # TRY NOT TO MODIFY: start the game
     obs, _ = envs.reset(seed=args.seed)
@@ -423,12 +508,71 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
                     target_network_param.data.copy_(
                         args.tau * q_network_param.data + (1.0 - args.tau) * target_network_param.data
                     )
+                iteration += 1
+
+                # NORTH Growing
+                if args.growth and iteration % args.iterations_to_grow == 0:
+                    print("GROWING/PRUNING:", global_step)
+                    for i in range(len(target_network.growth_net)-1):
+                        # print("The size of activation of layer {}: {}".format(i, agent.growth_net.activations[str(i)].shape))
+                        # print("The size of my activation of layer {}: {}".format(i, activation[str(i)].shape))
+                        #score = orthogonality_gap(agent.growth_net.activations[str(i)])
+                        max_rank = target_network.growth_net[i].width()
+                        # score = NORTH_score(agent.growth_net.activations[str(i)], batchsize=batch_size)
+                        score = NORTH_score(target_network.activation[str(i)], batchsize=args.batch_size, threshold=args.threshold)
+                        # score = NORTH_score(agent.growth_net[i].weight, batchsize=batch_size)
+
+                        if iteration == args.iterations_to_grow:
+                            initial_scores.append(score)
+                        initScore = 0.97 * initial_scores[i]
+                        to_add = max(0, int(target_network.growth_net[i].weight.size()[0] * (score - initScore)))
+
+                        print(f'Current Size: {max_rank} | Upper Bound: {upper_bounds[i]}')
+                        remaining_nodes = upper_bounds[i] - max_rank
+                        if to_add > remaining_nodes:
+                            to_add = remaining_nodes
+
+                        # to_add = 10
+                        print("Layer {} score: {}/{}, neurons to add: {}".format(i, score, max_rank, to_add))
+
+                        target_network.growth_net.grow(i, to_add, fanin_weights="kaiming_uniform", optimizer=optimizer)
+                        q_network.growth_net.grow(i, to_add, fanin_weights="kaiming_uniform", optimizer=optimizer)
+
+                        # pruning WIP
+                        # scores = weight_sum(target_network.growth_net[i].weight)
+                        # to_prune = np.argsort(scores.detach().cpu().numpy())[:int(0.25*len(scores))]
+                        # print(f"TO PRUNE: {to_prune}")
+                        # target_network.growth_net.prune(i, to_prune, optimizer=optimizer)
+                        # q_network.growth_net.prune(i, to_prune, optimizer=optimizer)
 
     if args.save_model:
-        model_path = f"../runs/{run_name}/{args.exp_name}.cleanrl_model"
+        model_path = f"../runs/dqn-north-uncertainty/{run_name}/{args.exp_name}.cleanrl_model"
         torch.save(q_network.state_dict(), model_path)
         print(f"model saved to {model_path}")
         from sad_nns.utils.cleanrl.evals.dqn_eval import evaluate
+
+        # Initialize an empty list to store the output features
+        output_features = []
+
+        # Iterate through the main network modules
+        for module in q_network.network:
+            # Check if the module is an instance of ModSequential
+            if isinstance(module, neurops.ModSequential):
+                # Iterate through the modules within ModSequential
+                for sub_module in module:
+                    # Check if the sub_module is an instance of ModLinear
+                    if isinstance(sub_module, neurops.ModLinear):
+                        # Append the out_features of ModLinear to the list
+                        output_features.append(sub_module.out_features)
+                    
+
+        print(f'LINEAR SIZES: {output_features}')
+        
+        model_kwargs = {
+            # "conv_sizes": [16, 32, 64],
+            "linear_sizes": output_features,
+            # "out_features": args.output_features,
+        }
 
         episodic_returns = evaluate(
             model_path,
@@ -439,7 +583,8 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
             Model=QNetwork,
             device=device,
             epsilon=0.05,
-            env_kwargs=env_args
+            env_kwargs=env_args,
+            model_kwargs=model_kwargs,
         )
         for idx, episodic_return in enumerate(episodic_returns):
             writer.add_scalar("eval/episodic_return", episodic_return, idx)
