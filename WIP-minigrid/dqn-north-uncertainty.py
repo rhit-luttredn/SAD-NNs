@@ -92,7 +92,7 @@ class Args:
     """the learning rate of the optimizer"""
     num_envs: int = 1
     """the number of parallel game environments"""
-    buffer_size: int = 50_000
+    buffer_size: int = 10_000
     """the replay memory buffer size"""
     gamma: float = 0.99
     """the discount factor gamma"""
@@ -116,7 +116,7 @@ class Args:
     """the frequency of dropout"""
 
     # NORTH specific arguments
-    growth: bool = True
+    growth: bool = False
     """if toggled, the network will grow"""
     stop_growth: int|None = None
     """if not None, the network will stop growing at this step"""
@@ -148,7 +148,7 @@ def make_env(env_id, idx, capture_video, run_name, env_kwargs: dict = {}):
 
 
 class QNetwork(nn.Module):
-    def __init__(self, envs: VectorEnv, linear_sizes = []):
+    def __init__(self, envs: VectorEnv, linear_sizes: list = []):
         assert len(linear_sizes) > 0, "There must be at least one linear layer"
         super().__init__()
         height = envs.single_observation_space.shape[0]
@@ -383,7 +383,7 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
     assert isinstance(envs.single_action_space, gym.spaces.Discrete), "only discrete action space is supported"
     
     model_kwargs = {
-        "linear_sizes": args.linear_sizes,
+        "linear_sizes": list(args.linear_sizes),
     }
 
     q_network = QNetwork(envs, **model_kwargs).to(device)

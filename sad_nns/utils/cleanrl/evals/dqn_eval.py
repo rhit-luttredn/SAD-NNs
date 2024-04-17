@@ -43,4 +43,4 @@ def evaluate(
                 episodic_lengths += [info["episode"]["l"]]
         obs = next_obs
 
-    return episodic_returns
+    return episodic_returns, episodic_lengths
