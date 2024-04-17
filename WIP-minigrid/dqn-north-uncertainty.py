@@ -65,7 +65,7 @@ class Args:
     """if toggled, cuda will be enabled by default"""
     device: int|None = 6
     """the GPU device to use"""
-    track: bool = False
+    track: bool = True
     """if toggled, this experiment will be tracked with Weights and Biases"""
     wandb_project_name: str = "uncertainty-estimation"
     """the wandb's project name"""
@@ -75,13 +75,13 @@ class Args:
     """whether to capture videos of the agent performances (check out `videos` folder)"""
     save_model: bool = True
     """whether to save model into the `runs/{run_name}` folder"""
-    mc_dropout: bool = True
+    mc_dropout: bool = False
     """whether to use Monte Carlo Dropout for uncertainty estimation"""
 
     # Algorithm specific arguments
     env_id: str = "MineFieldEnv-v0"
     """the id of the environment"""
-    total_timesteps: int = 150_000
+    total_timesteps: int = 300_000
     """total timesteps of the experiments"""
     learning_rate: float = 1e-4
     """the learning rate of the optimizer"""
@@ -111,8 +111,10 @@ class Args:
     """the frequency of dropout"""
 
     # NORTH specific arguments
-    growth: bool = True
+    growth: bool = False
     """if toggled, the network will grow"""
+    stop_growth: int|None = None
+    """if not None, the network will stop growing at this step"""
     steps_to_grow: int = 5000
     """the grow the network every n steps"""
     iterations_to_grow: int = 10
@@ -230,6 +232,9 @@ class QNetwork(nn.Module):
         for layer in self.growth_net:
             if isinstance(layer, neurops.ModLinear):
                 layer.predropout.eval()
+    
+    def get_linear_sizes(self):
+        return [layer.out_features for layer in self.growth_net if isinstance(layer, neurops.ModLinear)]
 
 
 def linear_schedule(start_e: float, end_e: float, duration: int, t: int):
@@ -237,6 +242,7 @@ def linear_schedule(start_e: float, end_e: float, duration: int, t: int):
     return max(slope * t + start_e, end_e)
 
 
+@torch.no_grad()
 def mc_dropout(make_envs_thunk: callable, agent: QNetwork, forward_passes: int, eval_episodes: int, device: torch.device, verbose=False):
     """ Function to get the monte-carlo samples and uncertainty estimates
     through multiple forward passes
@@ -259,11 +265,9 @@ def mc_dropout(make_envs_thunk: callable, agent: QNetwork, forward_passes: int, 
     envs = make_envs_thunk(False)
     num_envs = envs.num_envs
     single_obs_shape = envs.single_observation_space.shape
-    # n_classes = envs.single_action_space.n
     softmax = nn.Softmax(dim=-1)
     softmax_temp = 0.1
 
-    # agent.eval()
     obs, _ = envs.reset()
     variances = []
     entropies = []
@@ -271,68 +275,46 @@ def mc_dropout(make_envs_thunk: callable, agent: QNetwork, forward_passes: int, 
     episode_count = 0
     agent.enable_dropout()
 
-    with torch.no_grad():
-        while episode_count < eval_episodes:
-            # Broadcast the obs to batch our forward passes
-            obs = torch.from_numpy(obs).to(device)
-            obs = obs.unsqueeze(0).repeat(forward_passes, 1, *([1] * (obs.dim() - 1)))  # shape (forward_passes, num_envs, *single_obs_shape)
-            obs = obs.view(forward_passes * num_envs, *single_obs_shape)  # shape (forward_passes * num_envs, *single_obs_shape)
+    while episode_count < eval_episodes:
+        # Broadcast the obs to batch our forward passes
+        obs = torch.from_numpy(obs).to(device)
+        obs = obs.unsqueeze(0).repeat(forward_passes, 1, *([1] * (obs.dim() - 1)))  # shape (forward_passes, num_envs, *single_obs_shape)
+        obs = obs.view(forward_passes * num_envs, *single_obs_shape)  # shape (forward_passes * num_envs, *single_obs_shape)
 
-            # MC Dropout
-            dropout_vals = agent(obs)  # shape (forward_passes * num_envs, n_classes)
-            dropout_vals = dropout_vals.view(forward_passes, num_envs, -1)  # shape (forward_passes, num_envs, n_classes)
-            # if verbose:
-            #     print("dropout:", dropout_vals)
-                # print("mean:", mean)
-            dropout_vals = softmax(dropout_vals / softmax_temp)  # shape (forward_passes, num_envs, n_classes)
-            # if verbose:
-            #     print("softmax:", dropout_vals)
-            # assert torch.isfinite(dropout_vals).all(), "dropout_vals has non-finite values"
+        # MC Dropout
+        dropout_vals = agent(obs)  # shape (forward_passes * num_envs, n_classes)
+        dropout_vals = dropout_vals.view(forward_passes, num_envs, -1)  # shape (forward_passes, num_envs, n_classes)
+        dropout_vals = softmax(dropout_vals / softmax_temp)  # shape (forward_passes, num_envs, n_classes)
 
-            # Calculate variance and entropy
-            variance = torch.var(dropout_vals, dim=0)  # shape (num_envs, n_classes)
-            variances.append(variance)
+        # Calculate variance, entropy, and mutual info
+        variance = torch.var(dropout_vals, dim=0)  # shape (num_envs, n_classes)
+        variances.append(variance)
 
-            mean = torch.mean(dropout_vals, dim=0)  # shape (num_envs, n_classes)
-            # if verbose:
-            #     print("mean:", mean)
-            entropy = -torch.sum(mean * torch.log(mean + 1e-9), axis=-1)  # shape (num_envs,)
+        mean = torch.mean(dropout_vals, dim=0)  # shape (num_envs, n_classes)
+        entropy = -torch.sum(mean * torch.log(mean + 1e-9), axis=-1)  # shape (num_envs,)
+        entropies.append(entropy)
 
-            # if verbose:
-            #     new = -torch.sum(dropout_vals * torch.log(dropout_vals + 1e-9), axis=-1)
-            #     print("new:", new)
-            #     print("mean new:", torch.mean(new, axis=0))
+        mutual_info = entropy - torch.mean(torch.sum(-dropout_vals * torch.log(dropout_vals + 1e-8), axis=-1), axis=0)  # shape (num_envs,)
+        mutual_infos.append(mutual_info)
 
-            # entropy = -torch.sum(dropout_vals * torch.log(dropout_vals + 1e-9), axis=-1)  # shape (forward_passes, num_envs)
-            # if verbose:
-            #     print("entropy:", entropy)
-            # entropy = torch.mean(entropy, axis=0)  # shape (num_envs,)
+        # Take a step
+        actions = torch.argmax(dropout_vals, dim=-1)  # shape (forward_passes, num_envs)
+        actions = actions.permute(1, 0)  # shape (num_envs, forward_passes)
+        actions = torch.mode(actions, dim=1).values.cpu().numpy()
+        next_obs, _, _, _, infos = envs.step(actions)
 
-            # assert torch.isfinite(entropy).all(), "entropy has non-finite values"
-            entropies.append(entropy)
+        if "final_info" in infos:
+            episode_count += sum("episode" in info for info in infos["final_info"])
 
-            # mutual_info = entropy - np.mean(np.sum(-dropout_vals * np.log(dropout_vals + epsilon), axis=-1), axis=0)  # shape (num_envs,)
-            mutual_info = entropy - torch.mean(torch.sum(-dropout_vals * torch.log(dropout_vals + 1e-8), axis=-1), axis=0)  # shape (num_envs,)
-            mutual_infos.append(mutual_info)
+        obs = next_obs
 
-            # Take a step
-            actions = torch.argmax(dropout_vals, dim=-1)  # shape (forward_passes, num_envs)
-            actions = actions.permute(1, 0)  # shape (num_envs, forward_passes)
-            actions = torch.mode(actions, dim=1).values.cpu().numpy()
-            next_obs, _, _, _, infos = envs.step(actions)
-
-            if "final_info" in infos:
-                episode_count += sum("episode" in info for info in infos["final_info"])
-
-            obs = next_obs
-
-        # Aggregate the results
-        variances = torch.cat(variances, dim=0).to(device)  # shape (eval_episodes * num_envs, n_classes)
-        variance = torch.mean(variances, dim=0)  # shape (n_classes,)
-        entropies = torch.cat(entropies, dim=0).to(device)  # shape (eval_episodes * num_envs,)
-        entropy = torch.mean(entropies)  # shape (1,)
-        mutual_infos = torch.cat(mutual_infos, dim=0).to(device)  # shape (eval_episodes * num_envs,)
-        mutual_info = torch.mean(mutual_infos)  # shape (1,)
+    # Aggregate the results
+    variances = torch.cat(variances, dim=0).to(device)  # shape (eval_episodes * num_envs, n_classes)
+    variance = torch.mean(variances, dim=0)  # shape (n_classes,)
+    entropies = torch.cat(entropies, dim=0).to(device)  # shape (eval_episodes * num_envs,)
+    entropy = torch.mean(entropies)  # shape (1,)
+    mutual_infos = torch.cat(mutual_infos, dim=0).to(device)  # shape (eval_episodes * num_envs,)
+    mutual_info = torch.mean(mutual_infos)  # shape (1,)
 
     print("Monte Carlo took", time.time() - start_time, "seconds")
     return entropy.item(), variance, mutual_info.item()
@@ -349,6 +331,8 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
 """
         )
     args = tyro.cli(Args)
+    if args.stop_growth is None:
+        args.stop_growth = args.total_timesteps + 1
     env_args = vars(EnvArgs())
     assert args.num_envs == 1, "vectorized envs are not supported at the moment"
     run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
@@ -384,9 +368,7 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
             [make_env(args.env_id, i, capture_video, run_name, env_kwargs=env_args) for i in range(args.num_envs)]
         )
         return envs
-    # envs = gym.vector.SyncVectorEnv(
-    #     [make_env(args.env_id, i, args.capture_video, run_name, env_kwargs=env_args) for i in range(args.num_envs)]
-    # )
+
     envs = make_envs_thunk()
     assert isinstance(envs.single_action_space, gym.spaces.Discrete), "only discrete action space is supported"
 
@@ -511,7 +493,7 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
                 iteration += 1
 
                 # NORTH Growing
-                if args.growth and iteration % args.iterations_to_grow == 0:
+                if args.growth and global_step < args.stop_growth and iteration % args.iterations_to_grow == 0:
                     print("GROWING/PRUNING:", global_step)
                     for i in range(len(target_network.growth_net)-1):
                         # print("The size of activation of layer {}: {}".format(i, agent.growth_net.activations[str(i)].shape))
@@ -552,29 +534,14 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
         from sad_nns.utils.cleanrl.evals.dqn_eval import evaluate
 
         # Initialize an empty list to store the output features
-        output_features = []
-
-        # Iterate through the main network modules
-        for module in q_network.network:
-            # Check if the module is an instance of ModSequential
-            if isinstance(module, neurops.ModSequential):
-                # Iterate through the modules within ModSequential
-                for sub_module in module:
-                    # Check if the sub_module is an instance of ModLinear
-                    if isinstance(sub_module, neurops.ModLinear):
-                        # Append the out_features of ModLinear to the list
-                        output_features.append(sub_module.out_features)
-                    
-
+        output_features = q_network.get_linear_sizes()
         print(f'LINEAR SIZES: {output_features}')
         
         model_kwargs = {
-            # "conv_sizes": [16, 32, 64],
-            "linear_sizes": output_features,
-            # "out_features": args.output_features,
+            "linear_sizes": output_features[:-1],
         }
 
-        episodic_returns = evaluate(
+        episodic_returns, episodic_lengths = evaluate(
             model_path,
             make_env,
             args.env_id,
@@ -586,8 +553,9 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
             env_kwargs=env_args,
             model_kwargs=model_kwargs,
         )
-        for idx, episodic_return in enumerate(episodic_returns):
+        for idx, episodic_return, episodic_length in enumerate(zip(episodic_returns, episodic_lengths)):
             writer.add_scalar("eval/episodic_return", episodic_return, idx)
+            writer.add_scalar("eval/episodic_length", episodic_length, idx)
 
     envs.close()
     writer.close()

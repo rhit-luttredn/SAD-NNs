@@ -26,6 +26,7 @@ def evaluate(
 
     obs, _ = envs.reset()
     episodic_returns = []
+    episodic_lengths = []
     while len(episodic_returns) < eval_episodes:
         if random.random() < epsilon:
             actions = np.array([envs.single_action_space.sample() for _ in range(envs.num_envs)])
@@ -39,6 +40,7 @@ def evaluate(
                     continue
                 print(f"eval_episode={len(episodic_returns)}, episodic_return={info['episode']['r']}")
                 episodic_returns += [info["episode"]["r"]]
+                episodic_lengths += [info["episode"]["l"]]
         obs = next_obs
 
     return episodic_returns
