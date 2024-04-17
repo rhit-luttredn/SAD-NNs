@@ -1,11 +1,12 @@
 #!/usr/bin/env python
 # docs and experiment results can be found at https://docs.cleanrl.dev/rl-algorithms/ppo/#ppopy
+import json
 import os
+import pathlib
 import random
 import sys
 import time
 from dataclasses import dataclass
-from operator import mul
 
 import gymnasium as gym
 import neurops
@@ -42,7 +43,7 @@ class EnvArgs:
     see_through_walls: bool = True
     """whether the agent can see through walls"""
 
-    wall_density: int = 0.3
+    wall_density: int = 0.5
     use_lava: bool = False
 
     # wall_freq: int = 2
@@ -77,6 +78,10 @@ class Args:
     """whether to save model into the `runs/{run_name}` folder"""
     mc_dropout: bool = False
     """whether to use Monte Carlo Dropout for uncertainty estimation"""
+    tags: tuple[str, ...] = ()
+    """the tags of this experiment"""
+    init_weights: pathlib.Path|None = None
+    """the path to the initial weights of the model, if None, the model will be trained from scratch"""
 
     # Algorithm specific arguments
     env_id: str = "MineFieldEnv-v0"
@@ -111,12 +116,10 @@ class Args:
     """the frequency of dropout"""
 
     # NORTH specific arguments
-    growth: bool = False
+    growth: bool = True
     """if toggled, the network will grow"""
     stop_growth: int|None = None
     """if not None, the network will stop growing at this step"""
-    steps_to_grow: int = 5000
-    """the grow the network every n steps"""
     iterations_to_grow: int = 10
     """the grow the network every n iterations"""
     threshold: float = 0.000
@@ -125,7 +128,7 @@ class Args:
     """the multiplier used to determine the upper bound of growth for each layer"""
 
     # Model specific arguments
-    # linear_sizes: list = [256, 256, 128]
+    linear_sizes: tuple[int, ...] = (256, 256, 128)
     # """the hidden sizes of the fully connected layers"""
 
 
@@ -133,7 +136,7 @@ def make_env(env_id, idx, capture_video, run_name, env_kwargs: dict = {}):
     def thunk():
         if capture_video and idx == 0:
             env = gym.make(env_id, render_mode="rgb_array", **env_kwargs)
-            env = gym.wrappers.RecordVideo(env, f"../videos/dqn-north-uncertainty/{run_name}")
+            env = gym.wrappers.RecordVideo(env, f"../videos/{args.exp_name}/{run_name}")
         else:
             env = gym.make(env_id, **env_kwargs)
         # env = FullyObsRotatingWrapper(env)
@@ -347,12 +350,19 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
             name=run_name,
             monitor_gym=True,
             save_code=True,
+            tags=args.tags,
         )
-    writer = SummaryWriter(f"../runs/dqn-north-uncertainty/{run_name}")
+    writer = SummaryWriter(f"../runs/{args.exp_name}/{run_name}")
     writer.add_text(
         "hyperparameters",
         "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])),
     )
+
+    with open(f"../runs/{args.exp_name}/{run_name}/env_args.json", "w") as f:
+        json.dump(env_args, f)
+    
+    with open(f"../runs/{args.exp_name}/{run_name}/args.json", "w") as f:
+        json.dump(vars(args), f)
 
     # TRY NOT TO MODIFY: seeding
     random.seed(args.seed)
@@ -371,24 +381,14 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
 
     envs = make_envs_thunk()
     assert isinstance(envs.single_action_space, gym.spaces.Discrete), "only discrete action space is supported"
-
-    # df = pd.DataFrame(
-    #     columns=[
-    #         "# Total Parameters", 
-    #         "# Total Neurons", 
-    #         "Model Summary", 
-    #         "Environment", 
-    #         "Size",
-    #         "Seed",
-    #         "Density",
-    #         "Average Test Reward"
-    #     ])
     
     model_kwargs = {
-        "linear_sizes": [256, 256, 128] #args.linear_sizes
+        "linear_sizes": args.linear_sizes,
     }
 
     q_network = QNetwork(envs, **model_kwargs).to(device)
+    if args.init_weights is not None:
+        q_network.load_state_dict(torch.load(args.init_weights, map_location=device))
     optimizer = optim.Adam(q_network.parameters(), lr=args.learning_rate)
     target_network = QNetwork(envs, **model_kwargs).to(device)
     target_network.load_state_dict(q_network.state_dict())
@@ -527,8 +527,14 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
                         # target_network.growth_net.prune(i, to_prune, optimizer=optimizer)
                         # q_network.growth_net.prune(i, to_prune, optimizer=optimizer)
 
+                    linear_sizes = q_network.get_linear_sizes()
+                    print(f'LINEAR SIZES: {linear_sizes}')
+                    for idx, size in enumerate(linear_sizes[:-1]):
+                        writer.add_scalar(f"growth/layer_{idx}_size", size, global_step)
+
+
     if args.save_model:
-        model_path = f"../runs/dqn-north-uncertainty/{run_name}/{args.exp_name}.cleanrl_model"
+        model_path = f"../runs/{args.exp_name}/{run_name}/q_network.model"
         torch.save(q_network.state_dict(), model_path)
         print(f"model saved to {model_path}")
         from sad_nns.utils.cleanrl.evals.dqn_eval import evaluate
@@ -541,11 +547,14 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
             "linear_sizes": output_features[:-1],
         }
 
+        with open(f"../runs/{args.exp_name}/{run_name}/model_kwargs.json", "w") as f:
+            json.dump(model_kwargs, f)
+
         episodic_returns, episodic_lengths = evaluate(
             model_path,
             make_env,
             args.env_id,
-            eval_episodes=10,
+            eval_episodes=50,
             run_name=f"{run_name}-eval",
             Model=QNetwork,
             device=device,
