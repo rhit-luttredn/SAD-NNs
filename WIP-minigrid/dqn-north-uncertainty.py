@@ -24,6 +24,9 @@ from sad_nns.envs.wrappers import FullyObsRotatingWrapper
 from stable_baselines3.common.buffers import ReplayBuffer
 from torch.nn import functional as F
 from torch.utils.tensorboard import SummaryWriter
+# added for sympotic test
+from statsmodels.tsa.stattools import adfuller
+from scipy.stats import linregress
 
 
 @dataclass
@@ -114,6 +117,8 @@ class Args:
     """the frequency of training"""
     dropout_frequency: int = 2000
     """the frequency of dropout"""
+    window_size: int = 10
+    """the size of the sliding window to determine asymtotic performance"""
 
     # NORTH specific arguments
     growth: bool = False
@@ -244,6 +249,36 @@ def linear_schedule(start_e: float, end_e: float, duration: int, t: int):
     slope = (end_e - start_e) / duration
     return max(slope * t + start_e, end_e)
 
+def rolling_average(data):
+    window_size = len(data)  # Set window size to the full length of the data
+    rolling_avg = []
+    for i in range(len(data) - window_size + 1):
+        window = data[i:i+window_size]
+        avg = sum(window) / window_size
+        rolling_avg.append(avg)
+    
+    return rolling_avg
+
+def check_asy(test_type, threshold, window, verbose):
+    # Window is a list of data poitns to check
+
+    if test_type=="slope":
+        # using slope of trend line
+        x_axis = [i for i in range(len(window))]
+        lg_result = linregress(window, x_axis)
+        if verbose:
+            print('slope of trend line: %f' % lg_result.slope)
+        return abs(lg_result.slope) < threshold
+    
+    if test_type=="adf":
+        # using ADF
+        adf_result = adfuller(window)
+        # print('ADF Statistic: %f' % result[0])
+        if verbose:
+            print('p-value: %f' % adf_result[1])
+        # reject the null hypothesis that it is non stationary.
+            # Therefore the data is stationary, we should grow
+        return adf_result[1] < threshold #default 0.05
 
 @torch.no_grad()
 def mc_dropout(make_envs_thunk: callable, agent: QNetwork, forward_passes: int, eval_episodes: int, device: torch.device, verbose=False):
@@ -415,9 +450,17 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
         print(f'Layer Width: {layer_width}')
         upper_bounds.append(layer_width)
 
+    reward_list = []
+
     # TRY NOT TO MODIFY: start the game
     obs, _ = envs.reset(seed=args.seed)
     for global_step in range(args.total_timesteps):
+
+        rolling_average = rolling_average(reward_list)
+        if len(rolling_average) >= args.window_size and check_asy(rolling_average):
+            # TODO: save step somewhere
+            break
+
         # Uncertainty Estimation
         if global_step % args.dropout_frequency == 0:
             entropy, variance, mutual_info = mc_dropout(make_envs_thunk, q_network, forward_passes=10, eval_episodes=args.num_envs, device=device)
@@ -449,6 +492,7 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
         if "final_info" in infos:
             for info in infos["final_info"]:
                 if info and "episode" in info:
+                    # TODO: add reward to ongoing list
                     print(f"global_step={global_step}, episodic_return={info['episode']['r']}, episodic_length {info['episode']['l']}")
                     writer.add_scalar("charts/episodic_return", info["episode"]["r"], global_step)
                     writer.add_scalar("charts/episodic_length", info["episode"]["l"], global_step)
