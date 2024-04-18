@@ -43,7 +43,7 @@ class GrowingBabyArgs:
     # total_timesteps: int = 100
     total_timesteps: int = 150_000
     """the total number of timesteps to train **ONCE FROZEN** each run (unless early stopping)."""
-    early_stop: bool = True
+    early_stop: bool = False
     """whether to stop early if the agent solves the environment"""
     growth: bool = True
     """if toggled, the network will grow"""
@@ -73,8 +73,6 @@ class FrozenAdultArgs:
     """the tags of this experiment"""
 
     # To be determined at runtime
-    init_weights: pathlib.Path|None = None
-    """the path to the initial weights"""
     linear_sizes: tuple[int, ...] = ()
     """the hidden sizes of the fully connected layers"""
 
@@ -165,19 +163,29 @@ if __name__ == "__main__":
     torch.manual_seed(seed)
     torch.backends.cudnn.deterministic = True
 
+    # Create a dummy env to create initial weights with
+    envs = gym.vector.SyncVectorEnv(
+        [make_env(args.env_id, 0, False, "", env_kwargs={"size": 10})]
+    )
+
     """Frozen Baby Experiments"""
     frozen_baby_args = copy(exp_args)
     frozen_baby_args.update(vars(FrozenBabyArgs()))
 
     for run in range(frozen_baby_args.pop('num_runs')):
-        frozen_baby_args["seed"] = run
+        with tempfile.NamedTemporaryFile() as f:
+            torch.manual_seed(seed + run)
+            qnetwork = QNetwork(envs, frozen_baby_args['linear_sizes'])
+            torch.save(qnetwork.state_dict(), f)
+            frozen_baby_args["init_weights"] = pathlib.Path(f.name)
+            frozen_baby_args["seed"] = run
 
-        log_name = None
-        if not VERBOSE:
-            log_name = f"frozen_baby_{run}.log"
-        if not run_command(make_command(frozen_baby_args), log_name=log_name):
-            print("Error in running the frozen baby experiment")
-            sys.exit(1)
+            log_name = None
+            if not VERBOSE:
+                log_name = f"frozen_baby_{run}.log"
+            if not run_command(make_command(frozen_baby_args), log_name=log_name):
+                print("Error in running the frozen baby experiment")
+                sys.exit(1)
 
     # Go through the runs and get the global step counts
     step_counts = []
@@ -207,19 +215,14 @@ if __name__ == "__main__":
     growing_baby_args["total_timesteps"] += grow_time
     growing_baby_args["stop_growth"] = grow_time
 
-    # Create a set of initial weights to share between the runs
-    envs = gym.vector.SyncVectorEnv(
-        [make_env(args.env_id, 0, False, "", env_kwargs={"size": 10})]
-    )
-    qnetwork = QNetwork(envs, growing_baby_args['linear_sizes'])
-
     # Save it to a tempfile and pass it to the growing baby runs
-    with tempfile.NamedTemporaryFile() as f:
-        torch.save(qnetwork.state_dict(), f)
-        growing_baby_args["init_weights"] = pathlib.Path(f.name)
-
-        for run in range(growing_baby_args.pop('num_runs')):
-            growing_baby_args["seed"] = run
+    for run in range(growing_baby_args.pop('num_runs')):
+        growing_baby_args["seed"] = seed + run
+        with tempfile.NamedTemporaryFile() as f:
+            torch.manual_seed(seed + run)
+            qnetwork = QNetwork(envs, growing_baby_args['linear_sizes'])
+            torch.save(qnetwork.state_dict(), f)
+            growing_baby_args["init_weights"] = pathlib.Path(f.name)
 
             log_name = None
             if not VERBOSE:
@@ -257,18 +260,13 @@ if __name__ == "__main__":
         frozen_adult_args["linear_sizes"] = linear_size
 
         # Share random set of weights between the runs
-        qnetwork = QNetwork(envs, linear_size)
-        with tempfile.NamedTemporaryFile() as f:
-            torch.save(qnetwork.state_dict(), f)
-            frozen_adult_args["init_weights"] = pathlib.Path(f.name)
+        for run in range(frozen_adult_args.pop('num_runs')):
+            frozen_adult_args["seed"] = run
 
-            for run in range(frozen_adult_args.pop('num_runs')):
-                frozen_adult_args["seed"] = run
-
-                log_name = None
-                if not VERBOSE:
-                    log_name = f"frozen_adult_{'-'.join(str(x) for x in linear_size)}_{run}.log"
-                
-                if not run_command(make_command(frozen_adult_args), log_name=log_name):
-                    print("Error in running the frozen adult experiment")
-                    sys.exit(1)
+            log_name = None
+            if not VERBOSE:
+                log_name = f"frozen_adult_{'-'.join(str(x) for x in linear_size)}_{run}.log"
+            
+            if not run_command(make_command(frozen_adult_args), log_name=log_name):
+                print("Error in running the frozen adult experiment")
+                sys.exit(1)
