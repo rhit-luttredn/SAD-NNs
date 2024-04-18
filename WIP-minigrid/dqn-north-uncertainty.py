@@ -65,7 +65,7 @@ class Args:
     """seed of the experiment"""
     torch_deterministic: bool = True
     """if toggled, `torch.backends.cudnn.deterministic=False`"""
-    cuda: bool = False
+    cuda: bool = True
     """if toggled, cuda will be enabled by default"""
     device: int|None = 6
     """the GPU device to use"""
@@ -117,8 +117,10 @@ class Args:
     """the frequency of training"""
     dropout_frequency: int = 2000
     """the frequency of dropout"""
-    window_size: int = 10
+    window_size: int = 100
     """the size of the sliding window to determine asymtotic performance"""
+    rolling_avg_size: int = 100
+    """the size of the sliding window to determine rolling average"""
 
     # NORTH specific arguments
     growth: bool = False
@@ -131,6 +133,12 @@ class Args:
     """the threshold to grow the network"""
     upper_bound_mult: int = 2
     """the multiplier used to determine the upper bound of growth for each layer"""
+    early_stop: bool = True
+    """determine whether or not we want to early stop"""
+    patience: int = 10
+    """how long to wait before early stopping"""
+    min_slope: int = 0.1
+    """minimum slope for reaching an asymptote"""
 
     # Model specific arguments
     linear_sizes: tuple[int, ...] = (256, 256, 128)
@@ -249,26 +257,29 @@ def linear_schedule(start_e: float, end_e: float, duration: int, t: int):
     slope = (end_e - start_e) / duration
     return max(slope * t + start_e, end_e)
 
-def rolling_average(data):
-    window_size = len(data)  # Set window size to the full length of the data
-    rolling_avg = []
-    for i in range(len(data) - window_size + 1):
-        window = data[i:i+window_size]
-        avg = sum(window) / window_size
-        rolling_avg.append(avg)
-    
-    return rolling_avg
+def rolling_average(data, window_size):
+    ret = np.cumsum(data, dtype=float)
+    ret[window_size:] = ret[window_size:] - ret[:-window_size]
+    return ret[window_size - 1:] / window_size
 
-def check_asy(test_type, threshold, window, verbose):
+def check_slope(rolling_avgs, window):
+    rolling_avgs = rolling_avgs[-window:]
+    slopes = [(rolling_avgs[i+1] - rolling_avgs[i]) / 1 for i in range(len(rolling_avgs)-1)] 
+    slope = sum(slopes) / len(slopes)
+    return slope < args.min_slope, slope
+
+def check_asy(test_type, window, verbose=False):
     # Window is a list of data poitns to check
 
     if test_type=="slope":
         # using slope of trend line
         x_axis = [i for i in range(len(window))]
         lg_result = linregress(window, x_axis)
+        slope = lg_result.slope
         if verbose:
-            print('slope of trend line: %f' % lg_result.slope)
-        return abs(lg_result.slope) < threshold
+            print('slope of trend line: %f' % slope)
+        # return abs(lg_result.slope) < threshold, slope
+        return slope < 0, slope
     
     if test_type=="adf":
         # using ADF
@@ -405,7 +416,7 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
     torch.manual_seed(args.seed)
     torch.backends.cudnn.deterministic = args.torch_deterministic
 
-    device = torch.device(("cuda", args.device) if torch.cuda.is_available() and args.cuda else "cpu")
+    device = torch.device(*("cuda", args.device) if torch.cuda.is_available() and args.cuda else "cpu")
 
     # env setup
     def make_envs_thunk(capture_video=args.capture_video):
@@ -451,15 +462,28 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
         upper_bounds.append(layer_width)
 
     reward_list = []
+    stop_count = 0
 
     # TRY NOT TO MODIFY: start the game
     obs, _ = envs.reset(seed=args.seed)
     for global_step in range(args.total_timesteps):
+        if args.early_stop:
+            rolling_avg = rolling_average(reward_list, args.rolling_avg_size)
+            slope = None
+            if len(rolling_avg) >= args.window_size:
+                stop, slope = check_slope(rolling_avg, args.window_size)
 
-        rolling_average = rolling_average(reward_list)
-        if len(rolling_average) >= args.window_size and check_asy(rolling_average):
-            # TODO: save step somewhere
-            break
+                # count number of consecutive negative slopes
+                if stop: 
+                    stop_count += 1
+                else:
+                    stop_count = 0
+
+                # determine whether to early stop
+                if stop_count > args.patience:
+                    # TODO: save step somewhere
+                    print(f'STOPPING STEP: {global_step}')
+                    break
 
         # Uncertainty Estimation
         if global_step % args.dropout_frequency == 0:
@@ -492,8 +516,9 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
         if "final_info" in infos:
             for info in infos["final_info"]:
                 if info and "episode" in info:
-                    # TODO: add reward to ongoing list
+                    reward_list.append(info['episode']['r'])
                     print(f"global_step={global_step}, episodic_return={info['episode']['r']}, episodic_length {info['episode']['l']}")
+                    print(f'SLOPE: {slope}')
                     writer.add_scalar("charts/episodic_return", info["episode"]["r"], global_step)
                     writer.add_scalar("charts/episodic_length", info["episode"]["l"], global_step)
 
@@ -606,7 +631,8 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
             env_kwargs=env_args,
             model_kwargs=model_kwargs,
         )
-        for idx, episodic_return, episodic_length in enumerate(zip(episodic_returns, episodic_lengths)):
+
+        for idx, (episodic_return, episodic_length) in enumerate(zip(episodic_returns, episodic_lengths)):
             writer.add_scalar("eval/episodic_return", episodic_return, idx)
             writer.add_scalar("eval/episodic_length", episodic_length, idx)
 
