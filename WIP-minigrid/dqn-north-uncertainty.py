@@ -1,5 +1,4 @@
 #!/usr/bin/env python
-# docs and experiment results can be found at https://docs.cleanrl.dev/rl-algorithms/ppo/#ppopy
 import json
 import os
 import pathlib
@@ -9,18 +8,15 @@ import time
 from dataclasses import dataclass
 
 import gymnasium as gym
-import neurops
 import numpy as np
-import pandas as pd
 import sad_nns.envs
 import torch
 import torch.nn as nn
 import torch.optim as optim
 import tyro
-from gymnasium.vector import VectorEnv
-from minigrid.wrappers import ImgObsWrapper, FullyObsWrapper, ActionBonus
 from neurops import NORTH_score, weight_sum
-from sad_nns.envs.wrappers import FullyObsRotatingWrapper
+from sad_nns.modules import QNetwork
+from sad_nns.utils import make_env
 from stable_baselines3.common.buffers import ReplayBuffer
 from torch.nn import functional as F
 from torch.utils.tensorboard import SummaryWriter
@@ -62,11 +58,11 @@ class Args:
     """seed of the experiment"""
     torch_deterministic: bool = True
     """if toggled, `torch.backends.cudnn.deterministic=False`"""
-    cuda: bool = False
+    cuda: bool = True
     """if toggled, cuda will be enabled by default"""
     device: int|None = 6
     """the GPU device to use"""
-    track: bool = True
+    track: bool = False
     """if toggled, this experiment will be tracked with Weights and Biases"""
     wandb_project_name: str = "uncertainty-estimation"
     """the wandb's project name"""
@@ -82,6 +78,8 @@ class Args:
     """the tags of this experiment"""
     init_weights: pathlib.Path|None = None
     """the path to the initial weights of the model, if None, the model will be trained from scratch"""
+    early_stop: bool = False
+    """whether to stop early if the agent solves the environment"""
 
     # Algorithm specific arguments
     env_id: str = "MineFieldEnv-v0"
@@ -130,114 +128,6 @@ class Args:
     # Model specific arguments
     linear_sizes: tuple[int, ...] = (256, 256, 128)
     # """the hidden sizes of the fully connected layers"""
-
-
-def make_env(env_id, idx, capture_video, run_name, env_kwargs: dict = {}):
-    def thunk():
-        if capture_video and idx == 0:
-            env = gym.make(env_id, render_mode="rgb_array", **env_kwargs)
-            env = gym.wrappers.RecordVideo(env, f"../videos/{args.exp_name}/{run_name}")
-        else:
-            env = gym.make(env_id, **env_kwargs)
-        # env = FullyObsRotatingWrapper(env)
-        env = ImgObsWrapper(env)
-        env = gym.wrappers.RecordEpisodeStatistics(env)
-        return env
-
-    return thunk
-
-
-class QNetwork(nn.Module):
-    def __init__(self, envs: VectorEnv, linear_sizes: list = []):
-        assert len(linear_sizes) > 0, "There must be at least one linear layer"
-        super().__init__()
-        height = envs.single_observation_space.shape[0]
-        width = envs.single_observation_space.shape[1]
-        n_input_channels = envs.single_observation_space.shape[2]
-
-        conv_layers = nn.Sequential(
-            nn.Conv2d(n_input_channels, 16, 8, padding=1),
-            nn.ReLU(),
-            nn.Conv2d(16, 32, 4, padding=1),
-            nn.ReLU(),
-            nn.Conv2d(32, 64, 3, padding=1),
-            nn.ReLU(),
-        )
-
-        # Calculate the size of the output of the conv_layers by doing one forward pass
-        dummy_input = torch.rand(1, n_input_channels, height, width)
-        output = conv_layers(dummy_input)
-        output_size = np.prod(output.shape)
-
-        # self.network = nn.Sequential(
-        #     conv_layers,
-        #     nn.Flatten(),
-        #     nn.Linear(output_size, 512),
-        #     nn.ReLU(),
-        #     self._make_dropout(0.5),
-        #     nn.Linear(512, 512),
-        #     nn.ReLU(),
-        #     self._make_dropout(0.5),
-        #     nn.Linear(512, envs.single_action_space.n),
-        # )
-
-        linear_sizes = [output_size] + linear_sizes + [envs.single_action_space.n]
-        linear_layers = []
-        for i in range(len(linear_sizes) - 1):
-            nonlinearity = "relu" if i < len(linear_sizes) - 2 else ""
-            linear_layers.append(neurops.ModLinear(linear_sizes[i], linear_sizes[i + 1], 
-                                                   predropout=True, nonlinearity=nonlinearity))
-
-        self.growth_net = neurops.ModSequential(
-            *linear_layers,
-            track_activations=True,
-            track_auxiliary_gradients=True,
-            input_shape = (output_size)
-        )
-
-        # self.growth_net = neurops.ModSequential(
-        #     neurops.ModLinear(output_size, linear_sizes[0], predropout=True),
-        #     neurops.ModLinear(linear_sizes[0], linear_sizes[1], predropout=True),
-        #     neurops.ModLinear(linear_sizes[1], linear_sizes[2], predropout=True),
-        #     neurops.ModLinear(linear_sizes[2], envs.single_action_space.n, predropout=True, nonlinearity=""),
-        #     track_activations=True,
-        #     track_auxiliary_gradients=True,
-        #     input_shape = (output_size)
-        # )
-
-        # for saving activations
-        self.activation = {}
-        def get_activation(name):
-            def hook(model, input, output):
-                self.activation[name] = output.detach()
-            return hook
-
-        # manual save of activation
-        for i in range(len(self.growth_net)):
-            self.growth_net[i].register_forward_hook(get_activation(str(i)))
-
-        self.network = nn.Sequential(
-            conv_layers,
-            nn.Flatten(),
-            self.growth_net,
-        )
-
-    def forward(self, x):
-        x = x.permute(0, 3, 1, 2)
-        return self.network(x / 255.0)
-
-    def enable_dropout(self):
-        for layer in self.growth_net:
-            if isinstance(layer, neurops.ModLinear):
-                layer.predropout.train()
-
-    def disable_dropout(self):
-        for layer in self.growth_net:
-            if isinstance(layer, neurops.ModLinear):
-                layer.predropout.eval()
-    
-    def get_linear_sizes(self):
-        return [layer.out_features for layer in self.growth_net if isinstance(layer, neurops.ModLinear)]
 
 
 def linear_schedule(start_e: float, end_e: float, duration: int, t: int):
@@ -342,7 +232,7 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
     if args.track:
         import wandb
 
-        wandb.init(
+        wandb_run = wandb.init(
             project=args.wandb_project_name,
             entity=args.wandb_entity,
             sync_tensorboard=True,
@@ -358,11 +248,15 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
         "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])),
     )
 
+    def convert(o):
+        if isinstance(o, pathlib.Path): return str(o)
+        raise TypeError
+
     with open(f"../runs/{args.exp_name}/{run_name}/env_args.json", "w") as f:
         json.dump(env_args, f)
     
     with open(f"../runs/{args.exp_name}/{run_name}/args.json", "w") as f:
-        json.dump(vars(args), f)
+        json.dump(vars(args), f, default=convert)
 
     # TRY NOT TO MODIFY: seeding
     random.seed(args.seed)
@@ -370,12 +264,12 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
     torch.manual_seed(args.seed)
     torch.backends.cudnn.deterministic = args.torch_deterministic
 
-    device = torch.device(("cuda", args.device) if torch.cuda.is_available() and args.cuda else "cpu")
+    device = torch.device(*("cuda", args.device) if torch.cuda.is_available() and args.cuda else "cpu")
 
     # env setup
     def make_envs_thunk(capture_video=args.capture_video):
         envs = gym.vector.SyncVectorEnv(
-            [make_env(args.env_id, i, capture_video, run_name, env_kwargs=env_args) for i in range(args.num_envs)]
+            [make_env(args.env_id, i, capture_video, f"{args.exp_name}/{run_name}", env_kwargs=env_args) for i in range(args.num_envs)]
         )
         return envs
 
@@ -532,6 +426,15 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
                     for idx, size in enumerate(linear_sizes[:-1]):
                         writer.add_scalar(f"growth/layer_{idx}_size", size, global_step)
 
+    run_stats = {
+        "global_steps": global_step+1,
+    }
+
+    # Initialize an empty list to store the output features
+    output_features = q_network.get_linear_sizes()
+    print(f'LINEAR SIZES: {output_features}')
+    if args.track:
+        wandb_run.summary["final_linear_sizes"] = output_features
 
     if args.save_model:
         model_path = f"../runs/{args.exp_name}/{run_name}/q_network.model"
@@ -539,10 +442,6 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
         print(f"model saved to {model_path}")
         from sad_nns.utils.cleanrl.evals.dqn_eval import evaluate
 
-        # Initialize an empty list to store the output features
-        output_features = q_network.get_linear_sizes()
-        print(f'LINEAR SIZES: {output_features}')
-        
         model_kwargs = {
             "linear_sizes": output_features[:-1],
         }
@@ -550,7 +449,7 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
         with open(f"../runs/{args.exp_name}/{run_name}/model_kwargs.json", "w") as f:
             json.dump(model_kwargs, f)
 
-        episodic_returns, episodic_lengths = evaluate(
+        episodic_stats = evaluate(
             model_path,
             make_env,
             args.env_id,
@@ -562,9 +461,20 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
             env_kwargs=env_args,
             model_kwargs=model_kwargs,
         )
-        for idx, episodic_return, episodic_length in enumerate(zip(episodic_returns, episodic_lengths)):
+        for idx, (episodic_return, episodic_length) in enumerate(zip(*episodic_stats)):
             writer.add_scalar("eval/episodic_return", episodic_return, idx)
             writer.add_scalar("eval/episodic_length", episodic_length, idx)
+        
+        run_stats["episodic_returns"] = list(episodic_stats[0])
+        run_stats["episodic_lengths"] = list(episodic_stats[1])
+
+    def convert(o):
+        if isinstance(o, np.float32): return float(o)
+        if isinstance(o, np.int32): return int(o)
+        raise TypeError
+
+    with open(f"../runs/{args.exp_name}/{run_name}/run_stats.json", "w") as f:
+        json.dump(run_stats, f, default=convert)
 
     envs.close()
     writer.close()
