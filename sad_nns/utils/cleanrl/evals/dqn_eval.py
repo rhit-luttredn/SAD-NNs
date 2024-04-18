@@ -38,9 +38,9 @@ def evaluate(
             for info in infos["final_info"]:
                 if "episode" not in info:
                     continue
-                print(f"eval_episode={len(episodic_returns)}, episodic_return={info['episode']['r']}")
-                episodic_returns += [info["episode"]["r"]]
-                episodic_lengths += [info["episode"]["l"]]
+                print(f"eval_episode={len(episodic_returns)}, episodic_return={info['episode']['r']}, episodic_length {info['episode']['l']}")
+                episodic_returns += list(info["episode"]["r"])
+                episodic_lengths += list(info["episode"]["l"])
         obs = next_obs
 
     return episodic_returns, episodic_lengths
