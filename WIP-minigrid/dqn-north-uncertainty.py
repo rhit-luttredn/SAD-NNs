@@ -63,7 +63,7 @@ class Args:
     """if toggled, `torch.backends.cudnn.deterministic=False`"""
     cuda: bool = False
     """if toggled, cuda will be enabled by default"""
-    device: int|None = 6
+    device: int|None = 4
     """the GPU device to use"""
     track: bool = False
     """if toggled, this experiment will be tracked with Weights and Biases"""
@@ -169,7 +169,7 @@ def check_asy(test_type, window, verbose=False):
         if verbose:
             print('slope of trend line: %f' % slope)
         # return abs(lg_result.slope) < threshold, slope
-        return slope < 0, slope
+        return slope < args.min_slope, slope
     
     if test_type=="adf":
         # using ADF
@@ -310,7 +310,7 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
     torch.manual_seed(args.seed)
     torch.backends.cudnn.deterministic = args.torch_deterministic
 
-    device = torch.device(*("cuda", args.device) if torch.cuda.is_available() and args.cuda else "cpu")
+    device = torch.device(("cuda", args.device) if torch.cuda.is_available() and args.cuda else "cpu")
 
     # env setup
     def make_envs_thunk(capture_video=args.capture_video):

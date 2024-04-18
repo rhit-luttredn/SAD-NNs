@@ -155,7 +155,7 @@ if __name__ == "__main__":
         args.wandb_project_name = args.exp_name
     
     exp_args = vars(args)
-    num_devices = exp_args.pop("devices")
+    devices = exp_args.pop("devices")
     procs_per_device = exp_args.pop("procs_per_device")
 
     # Set random seed
