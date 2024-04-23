@@ -58,9 +58,9 @@ class QNetwork(nn.Module):
             self.growth_net,
         )
 
-    def forward(self, x):
-        x = x.permute(0, 3, 1, 2)
-        return self.network(x / 255.0)
+    def forward(self, x: torch.Tensor):
+        x = x.permute(0, 3, 1, 2).type(torch.float32)
+        return self.network(x)
 
     def enable_dropout(self):
         for layer in self.growth_net:

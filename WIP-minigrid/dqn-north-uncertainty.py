@@ -62,7 +62,7 @@ class Args:
     """if toggled, cuda will be enabled by default"""
     device: int|None = 6
     """the GPU device to use"""
-    track: bool = False
+    track: bool = True
     """if toggled, this experiment will be tracked with Weights and Biases"""
     wandb_project_name: str = "uncertainty-estimation"
     """the wandb's project name"""
@@ -114,9 +114,9 @@ class Args:
     """the frequency of dropout"""
 
     # NORTH specific arguments
-    growth: bool = False
+    growth: bool = True
     """if toggled, the network will grow"""
-    stop_growth: int|None = None
+    stop_growth: int|None = 150_000
     """if not None, the network will stop growing at this step"""
     iterations_to_grow: int = 10
     """the grow the network every n iterations"""
@@ -170,7 +170,7 @@ def mc_dropout(make_envs_thunk: callable, agent: QNetwork, forward_passes: int, 
 
     while episode_count < eval_episodes:
         # Broadcast the obs to batch our forward passes
-        obs = torch.from_numpy(obs).to(device)
+        obs = torch.as_tensor(obs, device=device)
         obs = obs.unsqueeze(0).repeat(forward_passes, 1, *([1] * (obs.dim() - 1)))  # shape (forward_passes, num_envs, *single_obs_shape)
         obs = obs.view(forward_passes * num_envs, *single_obs_shape)  # shape (forward_passes * num_envs, *single_obs_shape)
 
@@ -291,7 +291,7 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
         args.buffer_size,
         envs.single_observation_space,
         envs.single_action_space,
-        device,
+        device=device,
         optimize_memory_usage=True,
         handle_timeout_termination=False,
     )
@@ -334,7 +334,8 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
             else:
                 actions = explore_dist.sample(sample_shape=(envs.num_envs,)).cpu().numpy()
         else:
-            q_values = q_network(torch.Tensor(obs).to(device))
+            with torch.no_grad():
+                q_values = q_network(torch.as_tensor(obs, device=device))
             actions = torch.argmax(q_values, dim=1).cpu().numpy()
 
         # TRY NOT TO MODIFY: execute the game and log data.
@@ -454,7 +455,7 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
             make_env,
             args.env_id,
             eval_episodes=50,
-            run_name=f"{run_name}-eval",
+            run_name=f"{args.exp_name}/{run_name}-eval",
             Model=QNetwork,
             device=device,
             epsilon=0.05,
