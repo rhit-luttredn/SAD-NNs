@@ -444,7 +444,7 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
                             scores = svd_score(pmatrix)
                             to_prune = np.argsort(scores.detach().cpu().numpy())[:int(0.25*len(scores))]
                             # print(to_prune)
-                            target_network.growth_net.prune(i, to_prune, optimizer=optimizer, clear_activations=True)
+                            target_network.growth_net.prune(i, to_prune, optimizer=optimizer, clear_activations=False)
 
                             # pruning WIP
                             # scores = weight_sum(target_network.growth_net[i].weight)
