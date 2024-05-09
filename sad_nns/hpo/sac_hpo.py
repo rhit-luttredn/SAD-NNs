@@ -7,12 +7,16 @@ from dataclasses import dataclass
 import gymnasium as gym
 import numpy as np
 import sad_nns.envs
+# from sad_nns.utils import RecurrentBuffer
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 import tyro
 from stable_baselines3.common.buffers import ReplayBuffer
+import pickle
+import pandas as pd
+
 from torch.utils.tensorboard import SummaryWriter
 
 
@@ -72,6 +76,7 @@ class EnvArgs:
     action_high=[1,.1,1]
     # To be computed at runtime
     device = None
+    step_size = 1
 
 def make_env(env_id, seed, idx, capture_video, run_name, env_kwargs: dict = {}):
     def thunk():
@@ -173,24 +178,20 @@ poetry run pip install "stable_baselines3==2.0.0a1"
         )
 
     args = tyro.cli(Args)
-    run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
-    if args.track:
-        import wandb
+    # run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
+    # if args.track:
+    #     import wandb
 
-        wandb.init(
-            project=args.wandb_project_name,
-            entity=args.wandb_entity,
-            sync_tensorboard=True,
-            config=vars(args),
-            name=run_name,
-            monitor_gym=True,
-            save_code=True,
-        )
-    writer = SummaryWriter(f"runs/{run_name}")
-    writer.add_text(
-        "hyperparameters",
-        "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])),
-    )
+    #     wandb.init(
+    #         project=args.wandb_project_name,
+    #         entity=args.wandb_entity,
+    #         sync_tensorboard=True,
+    #         config=vars(args),
+    #         name=run_name,
+    #         monitor_gym=True,
+    #         save_code=True,
+    #     )
+    
 
     # TRY NOT TO MODIFY: seeding
     random.seed(args.seed)
@@ -198,14 +199,31 @@ poetry run pip install "stable_baselines3==2.0.0a1"
     torch.manual_seed(args.seed)
     torch.backends.cudnn.deterministic = args.torch_deterministic
 
-    device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
+    device = torch.device("cuda:4" if torch.cuda.is_available() and args.cuda else "cpu")
 
     # env setup
     env_args = vars(EnvArgs())
+    best_path = []
+    path = []
+    observations = []
+    best_observations = []
+    rewards_hist = []
+    best_rewards = []
+    best_return = 0
+    # for step_size in [8,32,128]:
+    step_size = 1
+    frame_skip = 1
+    run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}_Frame_skip_{frame_skip}"
     env_args['device'] = device
+    env_args['step_size'] = step_size
     envs = gym.vector.SyncVectorEnv([make_env(args.env_id, args.seed, 0, args.capture_video, run_name, env_args)])
     assert isinstance(envs.single_action_space, gym.spaces.Box), "only continuous action space is supported"
 
+    writer = SummaryWriter(f"step_size_runs/{run_name}")
+    writer.add_text(
+        "hyperparameters",
+        "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])),
+    )
     max_action = float(envs.single_action_space.high[0])
 
     actor = Actor(envs).to(device)
@@ -235,27 +253,48 @@ poetry run pip install "stable_baselines3==2.0.0a1"
         device,
         handle_timeout_termination=False,
     )
+    # rb = ReccurentBuffer(
+    #     args.buffer_size,
+    #     envs.single_observation_space,
+    #     envs.single_action_space,
+    #     device,
+    #     handle_timeout_termination=False,
+    # )
     start_time = time.time()
 
     # TRY NOT TO MODIFY: start the game
     obs, _ = envs.reset(seed=args.seed)
-    for global_step in range(args.total_timesteps):
+    run_step = 0
+    for global_step in range(int(args.total_timesteps)):
         # ALGO LOGIC: put action logic here
-        if global_step < args.learning_starts:
-            actions = np.array([envs.single_action_space.sample() for _ in range(envs.num_envs)])
-        else:
-            actions, _, _ = actor.get_action(torch.Tensor(obs).to(device))
-            actions = actions.detach().cpu().numpy()
-
+        
+        if global_step%frame_skip==0: #this is a pretty bad way of doing this but I dont really care
+            if global_step < args.learning_starts:
+                actions = np.array([envs.single_action_space.sample() for _ in range(envs.num_envs)])
+            else:
+                actions, _, _ = actor.get_action(torch.Tensor(obs).to(device))
+                actions = actions.detach().cpu().numpy()
         # TRY NOT TO MODIFY: execute the game and log data.
+        
         next_obs, rewards, terminations, truncations, infos = envs.step(actions)
-
+        path.append(actions)
+        observations.append(next_obs)
+        rewards_hist.append(rewards)
+        if terminations.any():
+            path = []
+            rewards_hist = []
+            observations = []
         # TRY NOT TO MODIFY: record rewards for plotting purposes
         if "final_info" in infos:
             for info in infos["final_info"]:
-                print(f"global_step={global_step}, episodic_return={info['episode']['r']}")
-                writer.add_scalar("charts/episodic_return", info["episode"]["r"], global_step)
+                ep_return = info['episode']['r']
+                print(f"global_step={global_step}, episodic_return={ep_return}")
+                writer.add_scalar("charts/episodic_return", ep_return, global_step)
                 writer.add_scalar("charts/episodic_length", info["episode"]["l"], global_step)
+                if ep_return>best_return:
+                    best_path = path
+                    best_rewards = rewards_hist
+                    best_observations = observations
                 break
 
         # TRY NOT TO MODIFY: save data to reply buffer; handle `final_observation`
@@ -338,6 +377,17 @@ poetry run pip install "stable_baselines3==2.0.0a1"
                 writer.add_scalar("charts/SPS", int(global_step / (time.time() - start_time)), global_step)
                 if args.autotune:
                     writer.add_scalar("losses/alpha_loss", alpha_loss.item(), global_step)
-
+    pd.DataFrame(np.array(best_observations).reshape((-1,7))).to_csv("observations.csv")
+    pd.DataFrame(np.array(best_path).reshape((-1,2))).to_csv("path.csv")
+    pd.DataFrame(np.array(best_rewards).reshape((-1,1))).to_csv("rewards.csv")
+    # with open('path.txt',"wb") as file:
+    #     # file.write(str(best_path))
+    #     pickle.dump(best_path,file,protocol=-1)
+    # with open('observations.txt','wb') as file:
+    #     pickle.dump(best_observations,file,protocol=-1)
+    #     # file.write(str(best_observations))
+    # with open('rewards.txt',"wb") as file:
+    #     pickle.dump(best_rewards,file,protocol=-1)
+    #     # file.write(str(best_rewards))    
     envs.close()
     writer.close()

@@ -376,9 +376,12 @@ class Regression_Env_no_time(gym.Env):
                  device="cpu",
                  seed=None,
                  action_low=[-1.0, 0.0],
-                 action_high=[1.0, 1.0]) -> None:
+                 action_high=[1.0, 1.0],
+                 step_size = 1) -> None:
         self._action_low = action_low
         self._action_high = action_high
+        self.step_size = step_size
+        print("step size:",self.step_size)
         self.device = device
         if seed is not None:
             self._set_seed(seed)
@@ -533,54 +536,60 @@ class Regression_Env_no_time(gym.Env):
         batch_size = max(batch_size, 1)
         perm = np.random.permutation(training_samples)
 
-        self.epoch += 1
-        was_enabled = torch.is_grad_enabled()
-        torch.set_grad_enabled(
-            True
-        )  # Not really sure why but it won't work without this
-        self.model.train()
+        reward = 0
 
-        self.model.eval()
+        for epoch in range(self.step_size):
+            self.epoch += 1
+            was_enabled = torch.is_grad_enabled()
+            torch.set_grad_enabled(
+                True
+            )  # Not really sure why but it won't work without this
+            self.model.train()
+
+            self.model.eval()
+            Y_pred = self.model(self.X_train)
+            self.train_loss = self.loss_fn(Y_pred, self.Y_train).mean().item()
+
+            Y_pred = self.model(self.X_valid)
+            self.valid_loss = self.loss_fn(Y_pred, self.Y_valid).mean().item()
+
+            troublemakers = [self.train_loss, self.valid_loss]
+            if np.isnan(troublemakers).any() or np.isinf(troublemakers).any():
+                observation = self._get_observation()
+                reward = -2*(self.max_epoch-self.epoch)
+                done = True
+                info = self._get_info()
+                # print(observation, reward, done, False, info)
+                return observation, reward, done, False, info
+
+            for i in range(0, training_samples, batch_size):
+                batch = perm[i : i + batch_size]
+                X_batch = self.X_train[batch]
+                Y_batch = self.Y_train[batch]
+                Y_pred = self.model(X_batch)
+
+                loss = self.loss_fn(Y_pred, Y_batch)
+                self.optimizer.zero_grad()
+                loss.backward()
+                self.optimizer.step()
+
+            torch.set_grad_enabled(was_enabled)
+
+            self.model.eval()
+
+            Y_pred = self.model(self.X_valid)
+            self.valid_loss = self.loss_fn(Y_pred, self.Y_valid).mean().item()
+
+            reward += self._get_reward(
+                self.valid_loss,
+                self.initial_metric
+            )
+            if self.epoch >= self.max_epoch:
+                break
+
         Y_pred = self.model(self.X_train)
         self.train_loss = self.loss_fn(Y_pred, self.Y_train).mean().item()
-
-        Y_pred = self.model(self.X_valid)
-        self.valid_loss = self.loss_fn(Y_pred, self.Y_valid).mean().item()
-
-        troublemakers = [self.train_loss, self.valid_loss]
-        if np.isnan(troublemakers).any() or np.isinf(troublemakers).any():
-            observation = self._get_observation()
-            reward = -2*(self.max_epoch-self.epoch)
-            done = True
-            info = self._get_info()
-            # print(observation, reward, done, False, info)
-            return observation, reward, done, False, info
-
-        for i in range(0, training_samples, batch_size):
-            batch = perm[i : i + batch_size]
-            X_batch = self.X_train[batch]
-            Y_batch = self.Y_train[batch]
-            Y_pred = self.model(X_batch)
-
-            loss = self.loss_fn(Y_pred, Y_batch)
-            self.optimizer.zero_grad()
-            loss.backward()
-            self.optimizer.step()
-
-        torch.set_grad_enabled(was_enabled)
-
-        self.model.eval()
-        Y_pred = self.model(self.X_train)
-        self.train_loss = self.loss_fn(Y_pred, self.Y_train).mean().item()
-
-        Y_pred = self.model(self.X_valid)
-        self.valid_loss = self.loss_fn(Y_pred, self.Y_valid).mean().item()
-
-        reward = self._get_reward(
-            self.valid_loss,
-            self.initial_metric
-        )
-
+        
         done = False
         if self.epoch >= self.max_epoch:
             Y_pred = self.model(self.X_test)
