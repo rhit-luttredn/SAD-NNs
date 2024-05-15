@@ -9,7 +9,7 @@ from minigrid.manual_control import ManualControl
 
 @dataclass
 class Args:
-    env_id: str = "HardWallEnv-v0"
+    env_id: str = "MineFieldEnv-v0"
     # env_id: str = "MineFieldEnv-v0"
     """the environment id"""
     render_mode: str = "human"
@@ -30,13 +30,13 @@ class Args:
     """whether the agent can see through walls"""
     
     wall_density: int = 0.5
-    use_lava: bool = False
+    use_lava: bool = True
 
     # wall_freq: int = 2
     # """FOR HARDWALL: the number of tiles between walls"""
     # use_lava: bool = False
     # """FOR HARDWALL: whether to use lava"""
-    # lock_doors: bool = False
+    # lock_doors: bool = True
     # """FOR HARDWALL: whether to lock doors"""
 
 
