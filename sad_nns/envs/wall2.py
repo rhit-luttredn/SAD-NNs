@@ -4,7 +4,7 @@ from minigrid.core.world_object import Goal, Wall
 from minigrid.minigrid_env import MiniGridEnv
 
 
-class WallEnv(MiniGridEnv):
+class WallEnv2(MiniGridEnv):
     def __init__(
         self,
         size=10,
@@ -52,7 +52,7 @@ class WallEnv(MiniGridEnv):
             self.agent_dir = 0
 
         # Place a goal square in the bottom-right corner
-        self.put_obj(Goal(), width - 2, height - 2)
+        self.put_obj(Goal(), width - 2, 1)
 
         # Generate verical separation wall
         for i in range(0, height - 2):

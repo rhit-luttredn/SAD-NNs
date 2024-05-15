@@ -1,10 +1,11 @@
+from minigrid.core.constants import COLOR_NAMES
 from minigrid.core.grid import Grid
 from minigrid.core.mission import MissionSpace
-from minigrid.core.world_object import Goal, Wall
+from minigrid.core.world_object import Goal, Wall, Door
 from minigrid.minigrid_env import MiniGridEnv
 
 
-class WallEnv(MiniGridEnv):
+class DoorEnv(MiniGridEnv):
     def __init__(
         self,
         size=10,
@@ -57,6 +58,10 @@ class WallEnv(MiniGridEnv):
         # Generate verical separation wall
         for i in range(0, height - 2):
             self.grid.set(3, i, Wall())
+
+        # add a door at a given global step
+        door = Door(COLOR_NAMES[0], is_locked=False)
+        self.put_obj(door, 3, height - 2)
 
         self.mission = "grand mission"
 
