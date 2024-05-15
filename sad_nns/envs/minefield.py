@@ -1,6 +1,8 @@
 import random
 
 import numpy as np
+from gymnasium import spaces
+from minigrid.core.actions import Actions
 from minigrid.core.constants import COLOR_NAMES
 from minigrid.core.grid import Grid
 from minigrid.core.mission import MissionSpace
@@ -29,7 +31,7 @@ class MineFieldEnv(MiniGridEnv):
         assert width is not None and height is not None
 
         if max_steps is None:
-            max_steps = 8 * height * width
+            max_steps = 2 * height * width
 
         assert wall_density < 1
 
@@ -49,6 +51,9 @@ class MineFieldEnv(MiniGridEnv):
             **kwargs,
         )
 
+        self.pos_stack = [self.agent_pos]
+        # self.action_space = spaces.Discrete(3)
+
     @staticmethod
     def _gen_mission():
         return "grand mission"
@@ -65,8 +70,8 @@ class MineFieldEnv(MiniGridEnv):
         self.agent_dir = self.agent_start_dir
 
         # Place a goal square in the bottom-right corner
-        goal_pos = (width-2, height-2)
-        self.put_obj(Goal(), *goal_pos)
+        self.goal_pos = (width-2, height-2)
+        self.put_obj(Goal(), *self.goal_pos)
 
         # Generate the surrounding walls
         self.grid.wall_rect(0, 0, width, height)
@@ -79,7 +84,7 @@ class MineFieldEnv(MiniGridEnv):
             width - 2, 
             height - 2, 
             (self.agent_pos[0] - 1, self.agent_pos[1] - 1),
-            (goal_pos[0] - 1, goal_pos[1] - 1)
+            (self.goal_pos[0] - 1, self.goal_pos[1] - 1)
         )
         grid = grid * path
 
@@ -116,3 +121,31 @@ class MineFieldEnv(MiniGridEnv):
         grid[end[1], end[0]] = 0
 
         return grid
+    
+    def step(self, action):
+        reward_adj = 0
+        # if self.grid.get(*self.front_pos) and self.grid.get(*self.front_pos).type == "wall" and action == Actions.forward:
+        #     reward_adj += -1
+
+        obs, reward, terminated, truncated, info = super().step(action)
+        if terminated:
+            assert reward > 0, "The agent should have reached the goal."
+            reward = reward / 2 + 0.5
+        elif truncated:
+            assert reward == 0, "The agent should NOT have reached the goal."
+            # calc manhattan distance to goal
+            dist = abs(self.agent_pos[0] - self.goal_pos[0]) + abs(self.agent_pos[1] - self.goal_pos[1])
+            reward = 1 / (dist + 1)
+            reward /= 2
+        reward *= 200
+
+        self.pos_stack.append(self.agent_pos)
+        if len(self.pos_stack) > 4:
+            self.pos_stack.pop(0)
+
+        if len(self.pos_stack) == 4 and len(set(self.pos_stack)) == 1:
+            reward_adj += -1
+        
+        reward += reward_adj
+
+        return obs, reward, terminated, truncated, info

@@ -5,12 +5,15 @@ from typing import Tuple, Union
 import sad_nns.envs
 import tyro
 from gymnasium import make
+
 from minigrid.manual_control import ManualControl
+from sad_nns.envs.wrappers import FullyObsRotatingWrapper
+
 
 @dataclass
 class Args:
+    # env_id: str = "HardWallEnv-v0"
     env_id: str = "MineFieldEnv-v0"
-    # env_id: str = "MineFieldEnv-v0"
     """the environment id"""
     render_mode: str = "human"
     """the rendering mode"""
@@ -29,14 +32,14 @@ class Args:
     see_through_walls: bool = True
     """whether the agent can see through walls"""
     
-    wall_density: int = 0.5
-    use_lava: bool = True
+    wall_density: int = 0.3
+    use_lava: bool = False
 
     # wall_freq: int = 2
     # """FOR HARDWALL: the number of tiles between walls"""
     # use_lava: bool = False
     # """FOR HARDWALL: whether to use lava"""
-    # lock_doors: bool = True
+    # lock_doors: bool = False
     # """FOR HARDWALL: whether to lock doors"""
 
 
@@ -47,6 +50,7 @@ if __name__ == "__main__":
     env_id = args.pop("env_id")
     args = {k: v for k, v in args.items() if v is not None}
     env = make(env_id, **args)
+    env = FullyObsRotatingWrapper(env)
     if args["render_mode"] == "human":
         manual_control = ManualControl(env)
         manual_control.start()

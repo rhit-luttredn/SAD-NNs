@@ -1,9 +1,12 @@
 from functools import reduce
 from operator import mul
 
+import gymnasium as gym
 import numpy as np
 import torch
 import torch.nn as nn
+from minigrid.wrappers import ImgObsWrapper
+from sad_nns.envs.wrappers import OneHotImageWrapper, FullyObsRotatingWrapper
 from sklearn.datasets import make_regression
 from sklearn.model_selection import train_test_split
 from torchinfo import summary
@@ -98,3 +101,19 @@ def random_regression(
     )
 
     return (X_train, Y_train, X_valid, Y_valid, X_test, Y_test)
+
+
+def make_env(env_id, idx, capture_video, run_path, env_kwargs: dict = {}):
+    def thunk():
+        if capture_video and idx == 0:
+            env = gym.make(env_id, render_mode="rgb_array", **env_kwargs)
+            env = gym.wrappers.RecordVideo(env, f"../videos/{run_path}")
+        else:
+            env = gym.make(env_id, **env_kwargs)
+        # env = FullyObsRotatingWrapper(env)
+        env = OneHotImageWrapper(env)
+        env = ImgObsWrapper(env)
+        env = gym.wrappers.RecordEpisodeStatistics(env)
+        return env
+
+    return thunk
