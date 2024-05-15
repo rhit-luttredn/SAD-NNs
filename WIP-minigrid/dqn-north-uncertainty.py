@@ -20,11 +20,14 @@ from sad_nns.utils import make_env
 from stable_baselines3.common.buffers import ReplayBuffer
 from torch.nn import functional as F
 from torch.utils.tensorboard import SummaryWriter
+# added for sympotic test
+from statsmodels.tsa.stattools import adfuller
+from scipy.stats import linregress
 
 
 @dataclass
 class EnvArgs:
-    size: int|None = 10
+    size: int|None = 6
     """the height and width of the environment"""
     width: int|None = None
     """the width of the environment"""
@@ -58,13 +61,13 @@ class Args:
     """seed of the experiment"""
     torch_deterministic: bool = True
     """if toggled, `torch.backends.cudnn.deterministic=False`"""
-    cuda: bool = True
+    cuda: bool = False
     """if toggled, cuda will be enabled by default"""
-    device: int|None = 6
+    device: int|None = 5
     """the GPU device to use"""
     track: bool = True
     """if toggled, this experiment will be tracked with Weights and Biases"""
-    wandb_project_name: str = "uncertainty-estimation"
+    wandb_project_name: str = "uncertainty-estimation3"
     """the wandb's project name"""
     wandb_entity: str = 'sad-nns'
     """the entity (team) of wandb's project"""
@@ -82,8 +85,10 @@ class Args:
     """whether to stop early if the agent solves the environment"""
 
     # Algorithm specific arguments
-    env_id: str = "MineFieldEnv-v0"
+    env_id: str = "WallEnv-v0"
     """the id of the environment"""
+    env_id2: str = "WallEnv2-v0"
+    """the id of the second environment"""
     total_timesteps: int = 300_000
     """total timesteps of the experiments"""
     learning_rate: float = 1e-4
@@ -104,7 +109,7 @@ class Args:
     """the starting epsilon for exploration"""
     end_e: float = 0.01
     """the ending epsilon for exploration"""
-    exploration_fraction: float = 0.10
+    exploration_fraction: float = 0.20
     """the fraction of `total-timesteps` it takes from start-e to go end-e"""
     learning_starts: int = 1_200
     """timestep to start learning"""
@@ -112,6 +117,10 @@ class Args:
     """the frequency of training"""
     dropout_frequency: int = 2000
     """the frequency of dropout"""
+    window_size: int = 100
+    """the size of the sliding window to determine asymtotic performance"""
+    rolling_avg_size: int = 100
+    """the size of the sliding window to determine rolling average"""
 
     # NORTH specific arguments
     growth: bool = True
@@ -124,6 +133,10 @@ class Args:
     """the threshold to grow the network"""
     upper_bound_mult: int = 2
     """the multiplier used to determine the upper bound of growth for each layer"""
+    patience: int = 50
+    """how long to wait before early stopping"""
+    min_slope: int = 0.01
+    """minimum slope for reaching an asymptote"""
 
     # Model specific arguments
     linear_sizes: tuple[int, ...] = (256, 256, 128)
@@ -134,6 +147,29 @@ def linear_schedule(start_e: float, end_e: float, duration: int, t: int):
     slope = (end_e - start_e) / duration
     return max(slope * t + start_e, end_e)
 
+def rolling_average(data, window_size):
+    ret = np.cumsum(data, dtype=float)
+    ret[window_size:] = ret[window_size:] - ret[:-window_size]
+    return ret[window_size - 1:] / window_size
+
+def check_slope(rolling_avgs, window):
+    rolling_avgs = rolling_avgs[-window:]
+    slopes = [(rolling_avgs[i+1] - rolling_avgs[i]) / 1 for i in range(len(rolling_avgs)-1)] 
+    slope = sum(slopes) / len(slopes)
+    return slope < args.min_slope, slope
+
+def check_asy(test_type, window, verbose=False):
+    # Window is a list of data poitns to check
+
+    if test_type=="slope":
+        # using slope of trend line
+        x_axis = [i for i in range(len(window))]
+        lg_result = linregress(window, x_axis)
+        slope = lg_result.slope
+        if verbose:
+            print('slope of trend line: %f' % slope)
+        # return abs(lg_result.slope) < threshold, slope
+        return slope < args.min_slope, slope
 
 @torch.no_grad()
 def mc_dropout(make_envs_thunk: callable, agent: QNetwork, forward_passes: int, eval_episodes: int, device: torch.device, verbose=False):
@@ -155,7 +191,7 @@ def mc_dropout(make_envs_thunk: callable, agent: QNetwork, forward_passes: int, 
     """
     print("Starting Monte Carlo")
     start_time = time.time()
-    envs = make_envs_thunk(False)
+    envs = make_envs_thunk()
     num_envs = envs.num_envs
     single_obs_shape = envs.single_observation_space.shape
     softmax = nn.Softmax(dim=-1)
@@ -264,12 +300,12 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
     torch.manual_seed(args.seed)
     torch.backends.cudnn.deterministic = args.torch_deterministic
 
-    device = torch.device(*("cuda", args.device) if torch.cuda.is_available() and args.cuda else "cpu")
+    device = torch.device(("cuda", args.device) if torch.cuda.is_available() and args.cuda else "cpu")
 
     # env setup
-    def make_envs_thunk(capture_video=args.capture_video):
+    def make_envs_thunk(capture_video=args.capture_video, env_id=args.env_id):
         envs = gym.vector.SyncVectorEnv(
-            [make_env(args.env_id, i, capture_video, f"{args.exp_name}/{run_name}", env_kwargs=env_args) for i in range(args.num_envs)]
+            [make_env(env_id, i, capture_video, f"{args.exp_name}/{run_name}", env_kwargs=env_args) for i in range(args.num_envs)]
         )
         return envs
 
@@ -309,9 +345,36 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
         print(f'Layer Width: {layer_width}')
         upper_bounds.append(layer_width)
 
+    reward_list = []
+    stop_count = 0
+    global_stop = None
+
     # TRY NOT TO MODIFY: start the game
     obs, _ = envs.reset(seed=args.seed)
     for global_step in range(args.total_timesteps):
+
+        if args.env_id2 and global_step == args.total_timesteps // 2:
+            envs = make_envs_thunk(env_id=args.env_id2)
+            obs, _ = envs.reset(seed=args.seed)
+
+        slope = None
+        rolling_avg = rolling_average(reward_list, args.rolling_avg_size)
+        if len(rolling_avg) >= args.window_size:
+            stop, slope = check_slope(rolling_avg, args.window_size)
+
+            # count number of consecutive negative slopes
+            if stop: 
+                stop_count += 1
+            else:
+                stop_count = 0
+
+            # determine whether to early stop
+            if stop_count > args.patience:
+                global_stop = global_step
+                if args.early_stop:
+                    print(f'STOPPING STEP: {global_step}')
+                    break
+
         # Uncertainty Estimation
         if global_step % args.dropout_frequency == 0:
             entropy, variance, mutual_info = mc_dropout(make_envs_thunk, q_network, forward_passes=10, eval_episodes=args.num_envs, device=device)
@@ -326,7 +389,8 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
             writer.add_scalar("uncertainty/entropy", entropy, global_step)
 
         # ALGO LOGIC: put action logic here
-        epsilon = linear_schedule(args.start_e, args.end_e, args.exploration_fraction * args.total_timesteps, global_step)
+        epsilon = linear_schedule(args.start_e, args.end_e, args.exploration_fraction * args.total_timesteps//2, global_step % args.total_timesteps//2)
+
         # epsilon = entropy / np.log(envs.single_action_space.n)
         if random.random() < epsilon:
             if not args.mc_dropout:
@@ -344,7 +408,9 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
         if "final_info" in infos:
             for info in infos["final_info"]:
                 if info and "episode" in info:
+                    reward_list.append(info['episode']['r'])
                     print(f"global_step={global_step}, episodic_return={info['episode']['r']}, episodic_length {info['episode']['l']}")
+                    print(f'SLOPE: {slope}')
                     writer.add_scalar("charts/episodic_return", info["episode"]["r"], global_step)
                     writer.add_scalar("charts/episodic_length", info["episode"]["l"], global_step)
 
@@ -360,6 +426,7 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
 
         # ALGO LOGIC: training.
         if global_step > args.learning_starts:
+
             if global_step % args.train_frequency == 0:
                 data = rb.sample(args.batch_size)
                 with torch.no_grad():
@@ -416,7 +483,7 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
                         q_network.growth_net.grow(i, to_add, fanin_weights="kaiming_uniform", optimizer=optimizer)
 
                         # pruning WIP
-                        # scores = weight_sum(target_network.growth_net[i].weight)
+                        # scores = weight_sum(tar get_network.growth_net[i].weight)
                         # to_prune = np.argsort(scores.detach().cpu().numpy())[:int(0.25*len(scores))]
                         # print(f"TO PRUNE: {to_prune}")
                         # target_network.growth_net.prune(i, to_prune, optimizer=optimizer)
@@ -427,8 +494,9 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
                     for idx, size in enumerate(linear_sizes[:-1]):
                         writer.add_scalar(f"growth/layer_{idx}_size", size, global_step)
 
+
     run_stats = {
-        "global_steps": global_step+1,
+            "global_steps": global_stop,
     }
 
     # Initialize an empty list to store the output features
