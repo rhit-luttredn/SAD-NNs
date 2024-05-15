@@ -105,7 +105,7 @@ class Args:
 def make_command(args: dict):
     command = [
         "python3",
-        "dqn-north-uncertainty-grow-and-prune.py"
+        "dqn-north-grow-and-prune.py"
     ]
 
     # Add all the arguments as command line arguments
