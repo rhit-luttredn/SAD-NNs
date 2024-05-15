@@ -20,7 +20,6 @@ from torch.utils.tensorboard import SummaryWriter
 
 @dataclass
 class EnvArgs:
-    """the rendering mode"""
     size: int|None = 10
     """the height and width of the environment"""
     width: int|None = None
