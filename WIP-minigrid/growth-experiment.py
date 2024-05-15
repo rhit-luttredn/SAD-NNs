@@ -21,13 +21,13 @@ from sad_nns.utils import make_env
 
 @dataclass
 class FrozenBabyArgs:
-    num_runs: int = 10
+    num_runs: int = 5
     """the number of runs for the frozen baby experiment"""
 
     # total_timesteps: int = 100
     total_timesteps: int = 150_000
     """the total number of timesteps for each run (unless early stopping)"""
-    early_stop: bool = True
+    early_stop: bool = False
     """whether to stop early if the agent solves the environment"""
     growth: bool = False
     """if toggled, the network will grow"""
@@ -37,7 +37,7 @@ class FrozenBabyArgs:
 
 @dataclass
 class GrowingBabyArgs:
-    num_runs: int = 10
+    num_runs: int = 5
     """the number of runs for the growing baby experiment"""
 
     # total_timesteps: int = 100
@@ -92,11 +92,11 @@ class Args:
     """the wandb's project name, if None, use exp_name"""
     track: bool = True
     """if toggled, this experiment will be tracked with Weights and Biases"""
-    capture_video: bool = False
-    """whether to capture videos of the agent performances (check out `videos` folder)"""
+    capture_video: bool = True
+    """whether to captur  e videos of the agent performances (check out `videos` folder)"""
     mc_dropout: bool = False
     """whether to use Monte Carlo Dropout for uncertainty estimation"""
-    env_id: str = "MineFieldEnv-v0"
+    env_id: str = "WallEnv-v0"
     """the id of the environment"""
     linear_sizes: tuple[int, ...] = (256, 256, 128)
     """the hidden sizes of the fully connected layers"""
@@ -144,7 +144,7 @@ def run_command(cmd: list[str], log_name: str = None):
     return result.returncode == 0
 
 
-VERBOSE = False
+VERBOSE = True
 
 
 if __name__ == "__main__":
@@ -153,7 +153,7 @@ if __name__ == "__main__":
         args.wandb_project_name = args.exp_name
     
     exp_args = vars(args)
-    num_devices = exp_args.pop("devices")
+    devices = exp_args.pop("devices")
     procs_per_device = exp_args.pop("procs_per_device")
 
     # Set random seed
