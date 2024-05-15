@@ -31,7 +31,7 @@ from torch.utils.tensorboard import SummaryWriter
 class Args:
     exp_name: str = os.path.basename(__file__)[: -len(".py")]
     """the name of this experiment"""
-    seed: int = 1
+    seed: int = 0
     """seed of the experiment"""
     torch_deterministic: bool = True
     """if toggled, `torch.backends.cudnn.deterministic=False`"""
@@ -43,19 +43,19 @@ class Args:
     """the wandb's project name"""
     wandb_entity: str = None
     """the entity (team) of wandb's project"""
-    capture_video: bool = True
+    capture_video: bool = False
     """whether to capture videos of the agent performances (check out `videos` folder)"""
 
     # Algorithm specific arguments
-    env_id: str = "MineFieldEnv-v0"
+    env_id: str = "WallEnv-v0"
     """the id of the environment"""
-    total_timesteps: int = 50_000
+    total_timesteps: int = 15_000 # 50_000
     """total timesteps of the experiments"""
     learning_rate: float = 2.5e-4
     """the learning rate of the optimizer"""
     num_envs: int = 8
     """the number of parallel game environments"""
-    num_steps: int = 256
+    num_steps: int = 128 # 256 
     """the number of steps to run in each environment per policy rollout"""
     anneal_lr: bool = True
     """Toggle learning rate annealing for policy and value networks"""
@@ -88,15 +88,23 @@ class Args:
     # conv_sizes: list = field(default_factory=lambda: [(8, 16), (16, 32)])
     conv_sizes: list = field(default_factory=lambda: [(8, 16, 32), (16, 32, 64), (32, 64, 128)])
     """the possible output channels for the each convolutional layers. Each tuple is a set for one layer"""
-    linear_sizes: list = field(default_factory=lambda: [[64], [64], [64]])
+    # linear_sizes: list = field(default_factory=lambda: [[64], [64], [64]])
     # linear_sizes: list = field(default_factory=lambda: [64])
-    # linear_sizes: list = field(default_factory=lambda: [64, 128, 256])
+    linear_sizes: list = field(default_factory=lambda: [(8, 16, 32), (16, 32, 64), (32, 64, 128)])
     """the possible output sizes for the each linear layers. Each tuple is a set for one layer"""
+    u_training_loops: int = 1
+    """the number of independent training loops for each experiment"""
+    training_loops: int = 1
+    """the number of times to train each agent"""
+    max_architectures: int = None
+    """the total number of architectures to test"""
+    num_seeds: int = 7
+    """the total number of seeds to run for each architecture"""
 
     # Environment specific arguments
-    env_size: int = 10
+    env_size: int = 6
     """the size of the environment"""
-    wall_density: float = 0.5
+    wall_density: float = 0.8
     use_lava: bool = False
 
     # to be filled in runtime
@@ -134,6 +142,17 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
     torch.nn.init.orthogonal_(layer.weight, std)
     torch.nn.init.constant_(layer.bias, bias_const)
     return layer
+
+
+def custom_init(model):
+    for layer in model.modules():
+        if isinstance(layer, nn.Linear):
+            # Create an alternating pattern of 0.5 and -0.5
+            weight_pattern = torch.Tensor([0.5 if i % 2 == 0 else -0.5 for i in range(layer.weight.numel())])
+            weight_pattern = weight_pattern.view(layer.weight.size())
+            layer.weight.data = weight_pattern
+            if layer.bias is not None:
+                layer.bias.data.fill_(0.0)
 
 
 # class Agent(nn.Module):
@@ -384,7 +403,6 @@ def main():
     args.num_iterations = args.total_timesteps // args.batch_size
     args.env_kwargs = {
         "size": args.env_size,
-        "wall_density": args.wall_density,
         "use_lava": args.use_lava,
     }
     run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
@@ -430,85 +448,119 @@ def main():
             "# Total Neurons", 
             "Model Summary", 
             "Environment", 
-            "Wall Density",
+            "Size",
             "Use Lava",
+            "Seed",
             "Average Test Reward", 
+            "Test Reward Variance"
         ])
 
     # Generate all possible combinations of architectures
-    arch_params = [args.conv_sizes, args.linear_sizes]
-    architectures = list(product(*[product(*x) for x in arch_params]))
+    # arch_params = [args.conv_sizes, args.linear_sizes]
+    # architectures = list(product(*[product(*x) for x in arch_params]))
+    architectures = list(product(*args.linear_sizes))
+    if args.max_architectures:
+        architectures = random.sample(architectures, args.max_architectures)
 
     # Iterate through each architecture
     start_time = time.time()
     model_rewards = []
-    for i, (conv_sizes, linear_sizes) in enumerate(architectures):
-    # for i, model in enumerate(architectures):
-        print(f'Iteration {i}/{len(architectures) - 1}')
+    # for i, linear_sizes in enumerate(architectures):
+    for seed in range(args.num_seeds):
+        # print(f'Iteration {i}/{len(architectures) - 1}')
+        print(f'Seed {seed}/{args.num_seeds - 1}')
+
+        torch.manual_seed(seed)
+
+        # model_kwargs = {
+        #     "conv_sizes": [8, 16, 32],
+        #     "linear_sizes": linear_sizes,
+        #     "out_features": args.output_features,
+        # }
         model_kwargs = {
-            "conv_sizes": conv_sizes,
-            "linear_sizes": linear_sizes,
+            "conv_sizes": [16, 32, 64],
+            "linear_sizes": [131, 140, 128],
             "out_features": args.output_features,
         }
-        # model_kwargs = {
-        #     "network": model,
-        #     "network_output_size": args.output_features,
-        # }
         
         # print(model_kwargs)
-        agent = PPOAgent(envs, **model_kwargs).to(device)
-        optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
+        # agent = PPOAgent(envs, **model_kwargs).to(device)
+        initial_model = PPOAgent(envs, **model_kwargs).to(device)
 
-        print(agent.network)
-        parameter_log.append(count_parameters(agent.network))
-        neuron_log.append(sum(p.numel() for p in agent.network.parameters() if p.requires_grad))
+        # at the last seed run custom initialization
+        # if seed == args.num_seeds:
+        #     custom_init(initial_model)
 
-        print("Training...")
-        writer = SummaryWriter(f"../runs/{run_name}/model-{i}")
-        writer.add_text(
-            "hyperparameters",
-            "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])),
-        )
+        optimizer = optim.Adam(initial_model.parameters(), lr=args.learning_rate, eps=1e-5)
 
-        train_single_model(agent, optimizer, envs, writer, args)
+        print(initial_model.network)
+        parameter_log.append(count_parameters(initial_model.network))
+        neuron_log.append(sum(p.numel() for p in initial_model.network.parameters() if p.requires_grad))
 
-        # Test the model
-        print("Testing...")
-        model_path = f"../runs/{run_name}/model-{i}/{args.exp_name}.model"
-        torch.save(agent.state_dict(), model_path)
-        print(f"model {i} saved to {model_path}")
+        initial_state_dict = initial_model.state_dict()
 
-        episodic_returns = evaluate(
-            model_path,
-            make_env,
-            args.env_id,
-            eval_episodes=10,
-            run_name=f"{run_name}-eval",
-            Model=PPOAgent,
-            device=device,
-            capture_video=True,
-            env_kwargs=args.env_kwargs,
-            model_kwargs=model_kwargs,
-        )
-        model_rewards.append(np.mean(episodic_returns))
-        for idx, episodic_return in enumerate(episodic_returns):
-            writer.add_scalar("eval/episodic_return", episodic_return, idx)
-        
-        writer.close()
+        for train_loop in range(args.u_training_loops):
+
+            agent = PPOAgent(envs, **model_kwargs).to(device)
+            # Load the saved initial weights
+            agent.load_state_dict(initial_state_dict)
+
+            # Re-initialize the optimizer for the new model instance
+            optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
+
+            print(f"Iteration: {train_loop}")
+            
+            for _ in range(args.training_loops):
+                print("Training...")
+                writer = SummaryWriter(f"../runs7/{run_name}/model-{seed}")
+                writer.add_text(
+                    "hyperparameters",
+                    "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])),
+                )
+
+                train_single_model(agent, optimizer, envs, writer, args)
+
+            # Test the model
+            print("Testing...")
+            model_path = f"../runs7/{run_name}/model-{seed}/{args.exp_name}.model"
+            torch.save(agent.state_dict(), model_path)
+            print(f"model {seed} saved to {model_path}")
+
+            episodic_returns = evaluate(
+                model_path,
+                make_env,
+                args.env_id,
+                eval_episodes=10,
+                run_name=f"{run_name}-eval",
+                Model=PPOAgent,
+                device=device,
+                capture_video=False,
+                env_kwargs=args.env_kwargs,
+                model_kwargs=model_kwargs,
+            )
+            model_rewards.append(np.mean(episodic_returns))
+            for idx, episodic_return in enumerate(episodic_returns):
+                writer.add_scalar("eval/episodic_return", episodic_return, idx)
+            
+            writer.close()
+
+        total_neurons = sum(p.numel() for p in agent.network.parameters() if p.requires_grad)
 
         df.loc[len(df.index)] = {
-            "# Total Parameters": parameter_log[i],
-            "# Total Neurons": neuron_log[i],
+            "# Total Parameters": count_parameters(agent.network),
+            "# Total Neurons": total_neurons,
             "Model Summary": str(agent.network),
             "Environment": args.env_id,
-            "Wall Density": args.wall_density,
+            "Size": args.env_size,
             "Use Lava": args.use_lava,
-            "Average Test Reward": np.mean(episodic_returns),
+            "Seed": seed,
+            "Average Test Reward": np.mean(model_rewards),
+            "Test Reward Variance": np.std(model_rewards)
         }
 
     envs.close()
 
-    df.to_csv(f"../runs/{run_name}/results.csv", index=False)
+    df.to_csv(f"../runs7/{run_name}/results.csv", index=False)
 
     # fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(20, 6))
 

@@ -1,10 +1,12 @@
 from functools import reduce
 from operator import mul
 
+import gymnasium as gym
 import numpy as np
 import torch
 import torch.nn as nn
-from torchinfo import summary
+from minigrid.wrappers import ImgObsWrapper
+from sad_nns.envs.wrappers import OneHotImageWrapper, FullyObsRotatingWrapper
 
 
 def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
@@ -58,3 +60,19 @@ def generate_feature_extractor(input_shape: tuple, conv_sizes: list, kernel_size
         *linear_layers,
     )
     return network
+
+
+def make_env(env_id, idx, capture_video, run_path, env_kwargs: dict = {}):
+    def thunk():
+        if capture_video and idx == 0:
+            env = gym.make(env_id, render_mode="rgb_array", **env_kwargs)
+            env = gym.wrappers.RecordVideo(env, f"../videos/{run_path}")
+        else:
+            env = gym.make(env_id, **env_kwargs)
+        # env = FullyObsRotatingWrapper(env)
+        env = OneHotImageWrapper(env)
+        env = ImgObsWrapper(env)
+        env = gym.wrappers.RecordEpisodeStatistics(env)
+        return env
+
+    return thunk

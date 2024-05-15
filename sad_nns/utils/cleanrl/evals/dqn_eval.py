@@ -17,14 +17,16 @@ def evaluate(
     epsilon: float = 0.05,
     capture_video: bool = True,
     env_kwargs: dict = {},
+    model_kwargs: dict = {},
 ):
-    envs = gym.vector.SyncVectorEnv([make_env(env_id, 0, 0, capture_video, run_name, env_kwargs=env_kwargs)])
-    model = Model(envs).to(device)
+    envs = gym.vector.SyncVectorEnv([make_env(env_id, 0, capture_video, run_name, env_kwargs=env_kwargs)])
+    model = Model(envs, **model_kwargs).to(device)
     model.load_state_dict(torch.load(model_path, map_location=device))
     model.eval()
 
     obs, _ = envs.reset()
     episodic_returns = []
+    episodic_lengths = []
     while len(episodic_returns) < eval_episodes:
         if random.random() < epsilon:
             actions = np.array([envs.single_action_space.sample() for _ in range(envs.num_envs)])
@@ -36,8 +38,9 @@ def evaluate(
             for info in infos["final_info"]:
                 if "episode" not in info:
                     continue
-                print(f"eval_episode={len(episodic_returns)}, episodic_return={info['episode']['r']}")
-                episodic_returns += [info["episode"]["r"]]
+                print(f"eval_episode={len(episodic_returns)}, episodic_return={info['episode']['r']}, episodic_length {info['episode']['l']}")
+                episodic_returns += list(info["episode"]["r"])
+                episodic_lengths += list(info["episode"]["l"])
         obs = next_obs
 
-    return episodic_returns
+    return episodic_returns, episodic_lengths

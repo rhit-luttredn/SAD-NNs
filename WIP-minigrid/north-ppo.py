@@ -10,6 +10,7 @@ from operator import mul
 import gymnasium as gym
 import neurops
 import numpy as np
+import pandas as pd
 import sad_nns.envs
 import torch
 import torch.nn as nn
@@ -17,7 +18,7 @@ import torch.optim as optim
 import tyro
 from gymnasium.vector import VectorEnv
 from minigrid.wrappers import ImgObsWrapper
-from neurops import NORTH_score
+from neurops import NORTH_score, weight_sum
 from torch.distributions.categorical import Categorical
 from torch.utils.tensorboard import SummaryWriter
 
@@ -26,7 +27,7 @@ from torch.utils.tensorboard import SummaryWriter
 class Args:
     exp_name: str = os.path.basename(__file__)[: -len(".py")]
     """the name of this experiment"""
-    seed: int = 1
+    seed: int = 0
     """seed of the experiment"""
     torch_deterministic: bool = True
     """if toggled, `torch.backends.cudnn.deterministic=False`"""
@@ -40,11 +41,11 @@ class Args:
     """the entity (team) of wandb's project"""
     capture_video: bool = False
     """whether to capture videos of the agent performances (check out `videos` folder)"""
-    save_model: bool = False
+    save_model: bool = True
     """whether to save model into the `runs/{run_name}` folder"""
 
     # Algorithm specific arguments
-    env_id: str = "SimpleEnv-v0"
+    env_id: str = "WallEnv-v0"
     # env_id: str = "BreakoutNoFrameskip-v4"
     """the id of the environment"""
     total_timesteps: int = 15_000
@@ -83,14 +84,19 @@ class Args:
     # NORTH specific arguments
     growth: bool = True
     """if toggled, the network will grow"""
-    iterations_to_grow: int = 1
+    iterations_to_grow: int = 5
     """the grow the network every n iterations"""
-    threshold: float = 0.005
+    threshold: float = 0.000
     """the threshold to grow the network"""
+
+    # Experiment specific arguments
+    output_features: int = 64
+    """the number of output features for each model's feature extractor"""
 
     # Environment specific arguments
     env_size: int = 10
     """the height and width of the environment"""
+    wall_density: float = 0.5
 
     # to be filled in runtime
     batch_size: int = 0
@@ -101,7 +107,11 @@ class Args:
     """the number of iterations (computed in runtime)"""
     env_kwargs: dict = None
     """the additional kwargs to pass to the gym environment (computed in runtime)"""
+    num_seeds: int = 7
+    """the total number of seeds to run for each architecture"""
 
+def count_parameters(model: nn.Module):
+    return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
 def make_env(env_id, idx, capture_video, run_name, env_kwargs: dict = {}):
     def thunk():
@@ -122,114 +132,7 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
     torch.nn.init.constant_(layer.bias, bias_const)
     return layer
 
-
-class Agent(nn.Module):
-    def __init__(self, envs: VectorEnv):
-        super().__init__()
-        height = envs.single_observation_space.shape[0]
-        width = envs.single_observation_space.shape[1]
-        n_input_channels = envs.single_observation_space.shape[2]
-
-        conv_layers = nn.Sequential(
-            layer_init(nn.Conv2d(n_input_channels, 16, 2, padding=1)),
-            nn.ReLU(),
-            layer_init(nn.Conv2d(16, 32, 2, padding=1)),
-            nn.ReLU(),
-            layer_init(nn.Conv2d(32, 64, 2, padding=1)),
-            nn.ReLU(),
-            nn.Flatten(),
-        )
-
-        # Calculate the size of the output of the conv_layers by doing one forward pass
-        dummy_input = torch.randn(1, n_input_channels, height, width)
-        output = conv_layers(dummy_input)
-        conv_out_shape = reduce(mul, output.shape, 1)
-
-        self.growth_net = neurops.ModSequential(
-            layer_init(neurops.ModLinear(conv_out_shape, 512)),
-            layer_init(neurops.ModLinear(512, 256)),
-            layer_init(neurops.ModLinear(256, 128, nonlinearity="")),
-            track_activations=True,
-            track_auxiliary_gradients=True,
-            input_shape = (conv_out_shape)
-        )
-
-        # for saving activations
-        self.activation = {}
-        def get_activation(name):
-            def hook(model, input, output):
-                self.activation[name] = output.detach()
-            return hook
-
-        # manual save of activation
-        for i in range(len(self.growth_net)):
-            self.growth_net[i].register_forward_hook(get_activation(str(i)))
-
-        self.network = nn.Sequential(
-            conv_layers,
-            self.growth_net,
-            nn.ReLU(),
-        )
-
-        self.actor = layer_init(nn.Linear(128, envs.single_action_space.n), std=0.01)
-        self.critic = layer_init(nn.Linear(128, 1), std=1)
-
-    def get_value(self, x):
-        x = x.permute(0, 3, 1, 2)
-        return self.critic(self.network(x / 255.0))
-
-    def get_action_and_value(self, x, action=None):
-        x = x.permute(0, 3, 1, 2)
-        hidden = self.network(x / 255.0)
-        logits = self.actor(hidden)
-        probs = Categorical(logits=logits)
-        if action is None:
-            action = probs.sample()
-        return action, probs.log_prob(action), probs.entropy(), self.critic(hidden)
-
-
-if __name__ == "__main__":
-    args = tyro.cli(Args)
-    args.batch_size = int(args.num_envs * args.num_steps)
-    args.minibatch_size = int(args.batch_size // args.num_minibatches)
-    args.num_iterations = args.total_timesteps // args.batch_size
-    args.env_kwargs = {"size": args.env_size}
-    run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
-    if args.track:
-        import wandb
-
-        wandb.init(
-            project=args.wandb_project_name,
-            entity=args.wandb_entity,
-            sync_tensorboard=True,
-            config=vars(args),
-            name=run_name,
-            monitor_gym=True,
-            save_code=True,
-        )
-    writer = SummaryWriter(f"../runs/{run_name}")
-    writer.add_text(
-        "hyperparameters",
-        "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])),
-    )
-
-    # TRY NOT TO MODIFY: seeding
-    random.seed(args.seed)
-    np.random.seed(args.seed)
-    torch.manual_seed(args.seed)
-    torch.backends.cudnn.deterministic = args.torch_deterministic
-
-    device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
-
-    # env setup
-    envs = gym.vector.SyncVectorEnv(
-        [make_env(args.env_id, i, args.capture_video, run_name, env_kwargs=args.env_kwargs) for i in range(args.num_envs)],
-    )
-    assert isinstance(envs.single_action_space, gym.spaces.Discrete), "only discrete action space is supported"
-
-    agent = Agent(envs).to(device)
-    optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
-
+def train_single_model(agent, optimizer, envs: VectorEnv, writer: SummaryWriter, args: Args):
     # ALGO Logic: Storage setup
     obs = torch.zeros((args.num_steps, args.num_envs) + envs.single_observation_space.shape).to(device)
     actions = torch.zeros((args.num_steps, args.num_envs) + envs.single_action_space.shape).to(device)
@@ -247,6 +150,34 @@ if __name__ == "__main__":
     initial_scores = []
 
     for iteration in range(1, args.num_iterations + 1):
+
+        # NORTH Growing
+        if iteration % args.iterations_to_grow == 0 and args.growth and iteration != 0:
+            print(iteration)
+            for i in range(len(agent.growth_net)-1):
+                # print("The size of activation of layer {}: {}".format(i, agent.growth_net.activations[str(i)].shape))
+                # print("The size of my activation of layer {}: {}".format(i, activation[str(i)].shape))
+                #score = orthogonality_gap(agent.growth_net.activations[str(i)])
+                max_rank = agent.growth_net[i].width()
+                # score = NORTH_score(agent.growth_net.activations[str(i)], batchsize=batch_size)
+                score = NORTH_score(agent.activation[str(i)], batchsize=args.batch_size, threshold=args.threshold)
+                # score = NORTH_score(agent.growth_net[i].weight, batchsize=batch_size)
+                if iteration == args.iterations_to_grow:
+                    initial_scores.append(score)
+                initScore = 0.97 * initial_scores[i]
+                to_add = max(0, int(agent.growth_net[i].weight.size()[0] * (score - initScore)))
+
+                # to_add = 10
+                print("Layer {} score: {}/{}, neurons to add: {}".format(i, score, max_rank, to_add))
+
+                agent.growth_net.grow(i, to_add, fanin_weights="kaiming_uniform", optimizer=optimizer)
+
+                # pruning WIP
+                scores = weight_sum(agent.growth_net[i].weight)
+                to_prune = np.argsort(scores.detach().cpu().numpy())[:int(0.25*len(scores))]
+                # print(f"TO PRUNE: {to_prune}")
+                # agent.growth_net.prune(i, to_prune, optimizer=optimizer)
+
         # Annealing the rate if instructed to do so.
         if args.anneal_lr:
             frac = 1.0 - (iteration - 1.0) / args.num_iterations
@@ -372,44 +303,200 @@ if __name__ == "__main__":
         print("SPS:", int(global_step / (time.time() - start_time)))
         writer.add_scalar("charts/SPS", int(global_step / (time.time() - start_time)), global_step)
 
-        # NORTH Growing
-        if iteration % args.iterations_to_grow == 0:
-            print(iteration)
-            for i in range(len(agent.growth_net)-1):
-                # print("The size of activation of layer {}: {}".format(i, agent.growth_net.activations[str(i)].shape))
-                # print("The size of my activation of layer {}: {}".format(i, activation[str(i)].shape))
-                #score = orthogonality_gap(agent.growth_net.activations[str(i)])
-                max_rank = agent.growth_net[i].width()
-                # score = NORTH_score(agent.growth_net.activations[str(i)], batchsize=batch_size)
-                score = NORTH_score(agent.activation[str(i)], batchsize=args.batch_size, threshold=args.threshold)
-                # score = NORTH_score(agent.growth_net[i].weight, batchsize=batch_size)
-                if iteration == args.iterations_to_grow:
-                    initial_scores.append(score)
-                initScore = 0.97 * initial_scores[i]
-                to_add = max(0, int(agent.growth_net[i].weight.size()[0] * (score - initScore)))
-                print("Layer {} score: {}/{}, neurons to add: {}".format(i, score, max_rank, to_add))
 
-                agent.growth_net.grow(i, to_add, fanin_weights="kaiming_uniform", optimizer=optimizer)
+class Agent(nn.Module):
+    def __init__(self, 
+                 envs: VectorEnv,
+                 linear_sizes = []):
+        super().__init__()
+        height = envs.single_observation_space.shape[0]
+        width = envs.single_observation_space.shape[1]
+        n_input_channels = envs.single_observation_space.shape[2]
 
-    if args.save_model:
-        model_path = f"../runs/{run_name}/{args.exp_name}.model"
-        torch.save(agent.state_dict(), model_path)
-        print(f"model saved to {model_path}")
-        from sad_nns.utils.cleanrl.evals.ppo_eval import evaluate
-
-        episodic_returns = evaluate(
-            model_path,
-            make_env,
-            args.env_id,
-            eval_episodes=10,
-            run_name=f"{run_name}-eval",
-            Model=Agent,
-            device=device,
-            capture_video=False,
-            env_kwargs=args.env_kwargs
+        conv_layers = nn.Sequential(
+            layer_init(nn.Conv2d(n_input_channels, 16, 2, padding=1)),
+            nn.ReLU(),
+            layer_init(nn.Conv2d(16, 32, 2, padding=1)),
+            nn.ReLU(),
+            layer_init(nn.Conv2d(32, 64, 2, padding=1)),
+            nn.ReLU(),
+            nn.Flatten(),
         )
-        for idx, episodic_return in enumerate(episodic_returns):
-            writer.add_scalar("eval/episodic_return", episodic_return, idx)
+
+        # Calculate the size of the output of the conv_layers by doing one forward pass
+        dummy_input = torch.randn(1, n_input_channels, height, width)
+        output = conv_layers(dummy_input)
+        conv_out_shape = reduce(mul, output.shape, 1)
+
+        self.growth_net = neurops.ModSequential(
+            layer_init(neurops.ModLinear(conv_out_shape, linear_sizes[0])),
+            layer_init(neurops.ModLinear(linear_sizes[0], linear_sizes[1])),
+            layer_init(neurops.ModLinear(linear_sizes[1], linear_sizes[2], nonlinearity="")),
+            track_activations=True,
+            track_auxiliary_gradients=True,
+            input_shape = (conv_out_shape)
+        )
+
+        # for saving activations
+        self.activation = {}
+        def get_activation(name):
+            def hook(model, input, output):
+                self.activation[name] = output.detach()
+            return hook
+
+        # manual save of activation
+        for i in range(len(self.growth_net)):
+            self.growth_net[i].register_forward_hook(get_activation(str(i)))
+
+        self.network = nn.Sequential(
+            conv_layers,
+            self.growth_net,
+            nn.ReLU(),
+        )
+
+        self.actor = layer_init(nn.Linear(linear_sizes[2], envs.single_action_space.n), std=0.01)
+        self.critic = layer_init(nn.Linear(linear_sizes[2], 1), std=1)
+
+    def get_value(self, x):
+        x = x.permute(0, 3, 1, 2)
+        return self.critic(self.network(x / 255.0))
+
+    def get_action_and_value(self, x, action=None):
+        x = x.permute(0, 3, 1, 2)
+        hidden = self.network(x / 255.0)
+        logits = self.actor(hidden)
+        probs = Categorical(logits=logits)
+        if action is None:
+            action = probs.sample()
+        return action, probs.log_prob(action), probs.entropy(), self.critic(hidden)
+
+
+if __name__ == "__main__":
+    args = tyro.cli(Args)
+    args.batch_size = int(args.num_envs * args.num_steps)
+    args.minibatch_size = int(args.batch_size // args.num_minibatches)
+    args.num_iterations = args.total_timesteps // args.batch_size
+    args.env_kwargs = {"size": args.env_size,
+                       "wall_density": args.wall_density}
+    run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
+    if args.track:
+        import wandb
+
+        wandb.init(
+            project=args.wandb_project_name,
+            entity=args.wandb_entity,
+            sync_tensorboard=True,
+            config=vars(args),
+            name=run_name,
+            monitor_gym=True,
+            save_code=True,
+        )
+
+    # TRY NOT TO MODIFY: seeding
+    random.seed(args.seed)
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    torch.backends.cudnn.deterministic = args.torch_deterministic
+
+    device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
+
+    # env setup
+    envs = gym.vector.SyncVectorEnv(
+        [make_env(args.env_id, i, args.capture_video, run_name, env_kwargs=args.env_kwargs) for i in range(args.num_envs)],
+    )
+    assert isinstance(envs.single_action_space, gym.spaces.Discrete), "only discrete action space is supported"
+
+    df = pd.DataFrame(
+        columns=[
+            "# Total Parameters", 
+            "# Total Neurons", 
+            "Model Summary", 
+            "Environment", 
+            "Size",
+            "Seed",
+            "Density",
+            "Average Test Reward"
+        ])
+    
+    model_kwargs = {
+        "linear_sizes": [256, 256, 128]
+    }
+
+    for seed in range(args.num_seeds):
+
+        writer = SummaryWriter(f"../runs6/{run_name}/model-{seed}")
+        writer.add_text(
+            "hyperparameters",
+            "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])),
+        )
+
+        agent = Agent(envs, **model_kwargs).to(device)
+        print(f'TEST: {[layer for layer in agent.network]}')
+        optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
+
+        train_single_model(agent, optimizer, envs, writer, args)
+
+        if args.save_model:
+            model_path = f"../runs6/{run_name}/model-{seed}/{args.exp_name}.model"
+            print(f'Model path: {model_path}')
+            torch.save(agent.state_dict(), model_path)
+            print(f"model saved to {model_path}")
+            from sad_nns.utils.cleanrl.evals.ppo_eval import evaluate
+
+            # Initialize an empty list to store the output features
+            output_features = []
+
+            # Iterate through the main network modules
+            for module in agent.network:
+                # Check if the module is an instance of ModSequential
+                if isinstance(module, neurops.ModSequential):
+                    # Iterate through the modules within ModSequential
+                    for sub_module in module:
+                        # Check if the sub_module is an instance of ModLinear
+                        if isinstance(sub_module, neurops.ModLinear):
+                            # Append the out_features of ModLinear to the list
+                            output_features.append(sub_module.out_features)
+                        
+
+            print(f'LINEAR SIZES: {output_features}')
+            
+            model_kwargs = {
+                # "conv_sizes": [16, 32, 64],
+                "linear_sizes": output_features,
+                # "out_features": args.output_features,
+            }
+
+            episodic_returns = evaluate(
+                model_path,
+                make_env,
+                args.env_id,
+                eval_episodes=10,
+                run_name=f"{run_name}-eval",
+                Model=Agent,
+                device=device,
+                capture_video=False,
+                env_kwargs=args.env_kwargs,
+                model_kwargs=model_kwargs
+            )
+            for idx, episodic_return in enumerate(episodic_returns):
+                writer.add_scalar("eval/episodic_return", episodic_return, idx)
+
+        total_neurons = sum(p.numel() for p in agent.network.parameters() if p.requires_grad)
+
+        print(f'Mean Episodic Return: {np.mean(episodic_returns)}')
+
+        df.loc[len(df.index)] = {
+                "# Total Parameters": count_parameters(agent.network),
+                "# Total Neurons": total_neurons,
+                "Model Summary": str(agent.network),
+                "Environment": args.env_id,
+                "Size": args.env_size,
+                "Seed": seed,
+                "Density": args.wall_density,
+                "Average Test Reward": np.mean(episodic_returns)
+            }
 
     envs.close()
     writer.close()
+    
+    df.to_csv(f"../runs6/{run_name}/results.csv", index=False)
