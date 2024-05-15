@@ -10,6 +10,7 @@ from itertools import product
 
 import gymnasium as gym
 import numpy as np
+import pandas as pd
 import sad_nns.envs
 import torch
 import torch.nn as nn
@@ -30,7 +31,7 @@ from torch.utils.tensorboard import SummaryWriter
 class Args:
     exp_name: str = os.path.basename(__file__)[: -len(".py")]
     """the name of this experiment"""
-    seed: int = 1
+    seed: int = 0
     """seed of the experiment"""
     torch_deterministic: bool = True
     """if toggled, `torch.backends.cudnn.deterministic=False`"""
@@ -46,15 +47,15 @@ class Args:
     """whether to capture videos of the agent performances (check out `videos` folder)"""
 
     # Algorithm specific arguments
-    env_id: str = "SimpleEnv-v0"
+    env_id: str = "WallEnv-v0"
     """the id of the environment"""
-    total_timesteps: int = 50_000
+    total_timesteps: int = 15_000 # 50_000
     """total timesteps of the experiments"""
     learning_rate: float = 2.5e-4
     """the learning rate of the optimizer"""
     num_envs: int = 8
     """the number of parallel game environments"""
-    num_steps: int = 256
+    num_steps: int = 128 # 256 
     """the number of steps to run in each environment per policy rollout"""
     anneal_lr: bool = True
     """Toggle learning rate annealing for policy and value networks"""
@@ -84,17 +85,27 @@ class Args:
     # Experiment specific arguments
     output_features: int = 64
     """the number of output features for each model's feature extractor"""
-    conv_sizes: list = field(default_factory=lambda: [(8, 16), (16, 32)])
-    # conv_sizes: list = field(default_factory=lambda: [(8, 16, 32), (16, 32, 64), (32, 64, 128)])
+    # conv_sizes: list = field(default_factory=lambda: [(8, 16), (16, 32)])
+    conv_sizes: list = field(default_factory=lambda: [(8, 16, 32), (16, 32, 64), (32, 64, 128)])
     """the possible output channels for the each convolutional layers. Each tuple is a set for one layer"""
     # linear_sizes: list = field(default_factory=lambda: [[64], [64], [64]])
-    linear_sizes: list = field(default_factory=lambda: [64])
-    # linear_sizes: list = field(default_factory=lambda: [64, 128, 256])
+    # linear_sizes: list = field(default_factory=lambda: [64])
+    linear_sizes: list = field(default_factory=lambda: [(8, 16, 32), (16, 32, 64), (32, 64, 128)])
     """the possible output sizes for the each linear layers. Each tuple is a set for one layer"""
+    u_training_loops: int = 1
+    """the number of independent training loops for each experiment"""
+    training_loops: int = 1
+    """the number of times to train each agent"""
+    max_architectures: int = None
+    """the total number of architectures to test"""
+    num_seeds: int = 7
+    """the total number of seeds to run for each architecture"""
 
     # Environment specific arguments
-    env_size: int = 10
+    env_size: int = 6
     """the size of the environment"""
+    wall_density: float = 0.8
+    use_lava: bool = False
 
     # to be filled in runtime
     batch_size: int = 0
@@ -133,100 +144,111 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
     return layer
 
 
-class Agent(nn.Module):
-    def __init__(self, envs: VectorEnv, network = None, network_output_size: int = 512):
-        super().__init__()
-        if (network is not None) != (network_output_size is not None):
-            raise ValueError("Please provide both `network` and `network_output_size` or none of them.")
+def custom_init(model):
+    for layer in model.modules():
+        if isinstance(layer, nn.Linear):
+            # Create an alternating pattern of 0.5 and -0.5
+            weight_pattern = torch.Tensor([0.5 if i % 2 == 0 else -0.5 for i in range(layer.weight.numel())])
+            weight_pattern = weight_pattern.view(layer.weight.size())
+            layer.weight.data = weight_pattern
+            if layer.bias is not None:
+                layer.bias.data.fill_(0.0)
 
-        if network is not None:
-            height = envs.single_observation_space.shape[0]
-            width = envs.single_observation_space.shape[1]
-            n_input_channels = envs.single_observation_space.shape[2]
 
-            conv_layers = nn.Sequential(
-                layer_init(nn.Conv2d(n_input_channels, 16, 2, padding=1)),
-                nn.ReLU(),
-                layer_init(nn.Conv2d(16, 32, 2, padding=1)),
-                nn.ReLU(),
-                layer_init(nn.Conv2d(32, 64, 2, padding=1)),
-                nn.ReLU(),
-            )
+# class Agent(nn.Module):
+#     def __init__(self, envs: VectorEnv, network = None, network_output_size: int = 512):
+#         super().__init__()
+#         if (network is not None) != (network_output_size is not None):
+#             raise ValueError("Please provide both `network` and `network_output_size` or none of them.")
 
-            # Calculate the size of the output of the conv_layers by doing one forward pass
-            dummy_input = torch.randn(1, n_input_channels, height, width)
-            output = conv_layers(dummy_input)
-            output_size = output.shape[1] * output.shape[2] * output.shape[3]
+#         if network is None:
+#             height = envs.single_observation_space.shape[0]
+#             width = envs.single_observation_space.shape[1]
+#             n_input_channels = envs.single_observation_space.shape[2]
 
-            self.network = nn.Sequential(
-                conv_layers,
-                nn.Flatten(),
-                nn.Linear(output_size, 512),
-                nn.ReLU(),
-            )
+#             conv_layers = nn.Sequential(
+#                 layer_init(nn.Conv2d(n_input_channels, 16, 2, padding=1)),
+#                 nn.ReLU(),
+#                 layer_init(nn.Conv2d(16, 32, 2, padding=1)),
+#                 nn.ReLU(),
+#                 layer_init(nn.Conv2d(32, 64, 2, padding=1)),
+#                 nn.ReLU(),
+#             )
 
-            self.actor = layer_init(nn.Linear(512, envs.single_action_space.n), std=0.01)
-            self.critic = layer_init(nn.Linear(512, 1), std=1)
-        else:
-            self.network = network
-            self.actor = layer_init(nn.Linear(network_output_size, envs.single_action_space.n), std=0.01)
-            self.critic = layer_init(nn.Linear(network_output_size, 1), std=1)
+#             # Calculate the size of the output of the conv_layers by doing one forward pass
+#             dummy_input = torch.randn(1, n_input_channels, height, width)
+#             output = conv_layers(dummy_input)
+#             output_size = output.shape[1] * output.shape[2] * output.shape[3]
 
-    def get_value(self, x):
-        x = x.permute(0, 3, 1, 2)
-        return self.critic(self.network(x / 255.0))
+#             self.network = nn.Sequential(
+#                 conv_layers,
+#                 nn.Flatten(),
+#                 nn.Linear(output_size, 512),
+#                 nn.ReLU(),
+#             )
 
-    def get_action_and_value(self, x, action=None):
-        x = x.permute(0, 3, 1, 2)
-        hidden = self.network(x / 255.0)
-        logits = self.actor(hidden)
-        probs = Categorical(logits=logits)
-        if action is None:
-            action = probs.sample()
-        return action, probs.log_prob(action), probs.entropy(), self.critic(hidden)
+#             self.actor = layer_init(nn.Linear(512, envs.single_action_space.n), std=0.01)
+#             self.critic = layer_init(nn.Linear(512, 1), std=1)
+#         else:
+#             self.network = network
+#             self.actor = layer_init(nn.Linear(network_output_size, envs.single_action_space.n), std=0.01)
+#             self.critic = layer_init(nn.Linear(network_output_size, 1), std=1)
+
+#     def get_value(self, x):
+#         x = x.permute(0, 3, 1, 2)
+#         return self.critic(self.network(x / 255.0))
+
+#     def get_action_and_value(self, x, action=None):
+#         x = x.permute(0, 3, 1, 2)
+#         hidden = self.network(x / 255.0)
+#         logits = self.actor(hidden)
+#         probs = Categorical(logits=logits)
+#         if action is None:
+#             action = probs.sample()
+#         return action, probs.log_prob(action), probs.entropy(), self.critic(hidden)
 
 
 def count_parameters(model: nn.Module):
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
 
-def generate_fixed_structure_models(input_channels, output_features, possible_conv_sizes, possible_linear_sizes):
-    models = []
-    # TODO: Implement using multiple linear layers
-    # Generate all possible combinations of intermediate layers
-    for conv_sizes in product(*possible_conv_sizes):
-        for linear_size in possible_linear_sizes:
-            # Check if the total number of neurons does not exceed the maximum
-            total_neurons = sum(conv_sizes) + linear_size 
+# def generate_fixed_structure_models(input_channels, output_features, possible_conv_sizes, possible_linear_sizes):
+#     models = []
+#     # TODO: Implement using multiple linear layers
+#     # Generate all possible combinations of intermediate layers
+#     for conv_sizes in product(*possible_conv_sizes):
+#         for linear_size in possible_linear_sizes:
+#             # Check if the total number of neurons does not exceed the maximum
+#             total_neurons = sum(conv_sizes) + linear_size 
 
-            layers = []
+#             layers = []
 
-            # Add convolutional layers
-            in_channels = input_channels
-            for out_channels in conv_sizes:
-                layers.append(layer_init(nn.Conv2d(in_channels, out_channels, kernel_size=(2, 2))))
-                layers.append(nn.ReLU())
-                in_channels = out_channels
+#             # Add convolutional layers
+#             in_channels = input_channels
+#             for out_channels in conv_sizes:
+#                 layers.append(layer_init(nn.Conv2d(in_channels, out_channels, kernel_size=(2, 2))))
+#                 layers.append(nn.ReLU())
+#                 in_channels = out_channels
 
-            # Flatten the output of the last conv layer
-            layers.append(nn.Flatten())
+#             # Flatten the output of the last conv layer
+#             layers.append(nn.Flatten())
 
-            # Add the two linear layers
-            in_features = in_channels * 16
-            layers.append(layer_init(nn.Linear(in_features, linear_size)))
+#             # Add the two linear layers
+#             in_features = in_channels * 16
+#             layers.append(layer_init(nn.Linear(in_features, linear_size)))
 
-            # Add the final output layer
-            layers.append(nn.Linear(linear_size, output_features))
+#             # Add the final output layer
+#             layers.append(nn.Linear(linear_size, output_features))
 
-            model = nn.Sequential(*layers)
+#             model = nn.Sequential(*layers)
             
-            total_params = count_parameters(model)
+#             total_params = count_parameters(model)
 
-            neuron_log.append(total_neurons)
-            parameter_log.append(total_params)
-            models.append(model)
+#             neuron_log.append(total_neurons)
+#             parameter_log.append(total_params)
+#             models.append(model)
 
-    return models
+#     return models
 
 
 def train_single_model(agent, optimizer, envs: VectorEnv, writer: SummaryWriter, args: Args):
@@ -379,7 +401,10 @@ def main():
     args.batch_size = int(args.num_envs * args.num_steps)
     args.minibatch_size = int(args.batch_size // args.num_minibatches)
     args.num_iterations = args.total_timesteps // args.batch_size
-    args.env_kwargs = {"size": args.env_size}
+    args.env_kwargs = {
+        "size": args.env_size,
+        "use_lava": args.use_lava,
+    }
     run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
     if args.track:
         import wandb
@@ -409,103 +434,160 @@ def main():
     )
     assert isinstance(envs.single_action_space, gym.spaces.Discrete), "only discrete action space is supported"
 
-    n_input_channels = envs.single_observation_space.shape[2]
-    architectures = generate_fixed_structure_models(
-        n_input_channels,
-        args.output_features,
-        args.conv_sizes,
-        args.linear_sizes,
-    )
+    # n_input_channels = envs.single_observation_space.shape[2]
+    # architectures = generate_fixed_structure_models(
+    #     n_input_channels,
+    #     args.output_features,
+    #     args.conv_sizes,
+    #     args.linear_sizes,
+    # )
+
+    df = pd.DataFrame(
+        columns=[
+            "# Total Parameters", 
+            "# Total Neurons", 
+            "Model Summary", 
+            "Environment", 
+            "Size",
+            "Use Lava",
+            "Seed",
+            "Average Test Reward", 
+            "Test Reward Variance"
+        ])
 
     # Generate all possible combinations of architectures
     # arch_params = [args.conv_sizes, args.linear_sizes]
     # architectures = list(product(*[product(*x) for x in arch_params]))
+    architectures = list(product(*args.linear_sizes))
+    if args.max_architectures:
+        architectures = random.sample(architectures, args.max_architectures)
 
     # Iterate through each architecture
     start_time = time.time()
     model_rewards = []
-    # for i, (conv_sizes, linear_sizes) in enumerate(architectures):
-    for i, model in enumerate(architectures):
-        print(f'Iteration {i}/{len(architectures) - 1}')
+    # for i, linear_sizes in enumerate(architectures):
+    for seed in range(args.num_seeds):
+        # print(f'Iteration {i}/{len(architectures) - 1}')
+        print(f'Seed {seed}/{args.num_seeds - 1}')
+
+        torch.manual_seed(seed)
+
         # model_kwargs = {
-        #     "conv_sizes": conv_sizes,
+        #     "conv_sizes": [8, 16, 32],
         #     "linear_sizes": linear_sizes,
         #     "out_features": args.output_features,
         # }
         model_kwargs = {
-            "network": model,
-            "network_output_size": args.output_features,
+            "conv_sizes": [16, 32, 64],
+            "linear_sizes": [131, 140, 128],
+            "out_features": args.output_features,
         }
         
         # print(model_kwargs)
-        agent = Agent(envs, **model_kwargs).to(device)
-        optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
+        # agent = PPOAgent(envs, **model_kwargs).to(device)
+        initial_model = PPOAgent(envs, **model_kwargs).to(device)
 
-        print(agent.network)
-        parameter_log[i] = count_parameters(agent.network)
-        neuron_log[i] = sum(p.numel() for p in agent.network.parameters() if p.requires_grad)
+        # at the last seed run custom initialization
+        # if seed == args.num_seeds:
+        #     custom_init(initial_model)
 
-        print("Training...")
-        writer = SummaryWriter(f"../runs/{run_name}/model-{i}")
-        writer.add_text(
-            "hyperparameters",
-            "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])),
-        )
+        optimizer = optim.Adam(initial_model.parameters(), lr=args.learning_rate, eps=1e-5)
 
-        train_single_model(agent, optimizer, envs, writer, args)
+        print(initial_model.network)
+        parameter_log.append(count_parameters(initial_model.network))
+        neuron_log.append(sum(p.numel() for p in initial_model.network.parameters() if p.requires_grad))
 
-        # Test the model
-        print("Testing...")
-        model_path = f"../runs/{run_name}/model-{i}/{args.exp_name}.model"
-        torch.save(agent.state_dict(), model_path)
-        print(f"model {i} saved to {model_path}")
+        initial_state_dict = initial_model.state_dict()
 
-        episodic_returns = evaluate(
-            model_path,
-            make_env,
-            args.env_id,
-            eval_episodes=10,
-            run_name=f"{run_name}-eval",
-            Model=Agent,
-            device=device,
-            capture_video=False,
-            env_kwargs=args.env_kwargs,
-            model_kwargs=model_kwargs,
-        )
-        model_rewards.append(np.mean(episodic_returns))
-        for idx, episodic_return in enumerate(episodic_returns):
-            writer.add_scalar("eval/episodic_return", episodic_return, idx)
-        
-        writer.close()
+        for train_loop in range(args.u_training_loops):
+
+            agent = PPOAgent(envs, **model_kwargs).to(device)
+            # Load the saved initial weights
+            agent.load_state_dict(initial_state_dict)
+
+            # Re-initialize the optimizer for the new model instance
+            optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
+
+            print(f"Iteration: {train_loop}")
+            
+            for _ in range(args.training_loops):
+                print("Training...")
+                writer = SummaryWriter(f"../runs7/{run_name}/model-{seed}")
+                writer.add_text(
+                    "hyperparameters",
+                    "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])),
+                )
+
+                train_single_model(agent, optimizer, envs, writer, args)
+
+            # Test the model
+            print("Testing...")
+            model_path = f"../runs7/{run_name}/model-{seed}/{args.exp_name}.model"
+            torch.save(agent.state_dict(), model_path)
+            print(f"model {seed} saved to {model_path}")
+
+            episodic_returns = evaluate(
+                model_path,
+                make_env,
+                args.env_id,
+                eval_episodes=10,
+                run_name=f"{run_name}-eval",
+                Model=PPOAgent,
+                device=device,
+                capture_video=False,
+                env_kwargs=args.env_kwargs,
+                model_kwargs=model_kwargs,
+            )
+            model_rewards.append(np.mean(episodic_returns))
+            for idx, episodic_return in enumerate(episodic_returns):
+                writer.add_scalar("eval/episodic_return", episodic_return, idx)
+            
+            writer.close()
+
+        total_neurons = sum(p.numel() for p in agent.network.parameters() if p.requires_grad)
+
+        df.loc[len(df.index)] = {
+            "# Total Parameters": count_parameters(agent.network),
+            "# Total Neurons": total_neurons,
+            "Model Summary": str(agent.network),
+            "Environment": args.env_id,
+            "Size": args.env_size,
+            "Use Lava": args.use_lava,
+            "Seed": seed,
+            "Average Test Reward": np.mean(model_rewards),
+            "Test Reward Variance": np.std(model_rewards)
+        }
 
     envs.close()
 
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(20, 6))
+    df.to_csv(f"../runs7/{run_name}/results.csv", index=False)
 
-    x1 = parameter_log
-    y = [np.mean(sub_array) for sub_array in model_rewards]
+    # fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(20, 6))
 
-    # Creating a scatter plot
-    ax1.scatter(x1, y)
-    ax1.set_xlabel('# Total Parameters')
-    ax1.set_ylabel('Average Training Reward')
-    ax1.set_title('Parameter Impact')
-    ax1.grid(True)
+    # x1 = parameter_log
+    # y = [np.mean(sub_array) for sub_array in model_rewards]
 
-    x2 = neuron_log
+    # # Creating a scatter plot
+    # ax1.scatter(x1, y)
+    # ax1.set_xlabel('# Total Parameters')
+    # ax1.set_ylabel('Average Training Reward')
+    # ax1.set_title('Parameter Impact')
+    # ax1.grid(True)
 
-    # Creating a scatter plot
-    ax2.scatter(x2, y)
-    ax2.set_xlabel('# Total Neurons')
-    ax2.set_ylabel('Average Training Reward')
-    ax2.set_title('Neuron Impact')
-    ax2.grid(True)
+    # x2 = neuron_log
 
-    plt.show()
+    # # Creating a scatter plot
+    # ax2.scatter(x2, y)
+    # ax2.set_xlabel('# Total Neurons')
+    # ax2.set_ylabel('Average Training Reward')
+    # ax2.set_title('Neuron Impact')
+    # ax2.grid(True)
 
-    end_time = time.time()
-    total_time = end_time - start_time
-    print("Total time to run file: {} seconds".format(total_time))
+    # plt.show()
+
+    # end_time = time.time()
+    # total_time = end_time - start_time
+    # print("Total time to run file: {} seconds".format(total_time))
 
 
 if __name__ == "__main__":

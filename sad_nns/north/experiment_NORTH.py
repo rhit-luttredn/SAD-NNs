@@ -22,11 +22,11 @@ torch.manual_seed(seed)
 print("Seed of this run: ", seed)
 
 # parameters
-batch_size = 128
+batch_size = 512
 epsilon = 0.01
 growth_epoch = 12
 end_epoch = 3
-total_epoch = 16
+total_epoch = 15
 learning_rate = 0.01
 train_accs= []
 test_accs = []
@@ -127,22 +127,23 @@ def test(model, test_loader, criterion):
     
     return 100. * correct / len(test_loader.dataset)
 
+ # for saving activations
+
+activation = {}
+def get_activation(name):
+    def hook(model, input, output):
+        activation[name] = output.detach()
+    return hook
+# manual save of activation
+for i in range(len(model)):
+    model[i].register_forward_hook(get_activation(str(i)))
+
 train(model, train_loader, optimizer, criterion, epochs=1, val_loader=val_loader)
 
 def run_exp(model, batch_size, epsilon, growth_epoch, end_epoch, total_epoch, learning_rate, criterion, growth):
     train_accs= []
     test_accs = []
     epochs = np.arange(total_epoch)
-    
-    # for saving activations
-    activation = {}
-    def get_activation(name):
-        def hook(model, input, output):
-            activation[name] = output.detach()
-        return hook
-
-    
-    
 
     if growth:
         # with growth
@@ -150,10 +151,6 @@ def run_exp(model, batch_size, epsilon, growth_epoch, end_epoch, total_epoch, le
         modded_optimizer_grow = torch.optim.SGD(modded_model_grow.parameters(), lr=learning_rate)
         modded_optimizer_grow.load_state_dict(optimizer.state_dict())
         initial_scores = []
-
-        # manual save of activation
-        for i in range(len(model)):
-            modded_model_grow[i].register_forward_hook(get_activation(str(i)))
 
         for iter in range(growth_epoch):
             for i in range(len(modded_model_grow)-1):
@@ -187,27 +184,67 @@ def run_exp(model, batch_size, epsilon, growth_epoch, end_epoch, total_epoch, le
             print("Layer {} weight matrix after growth {}".format(j, modded_model_grow[j].weight.size()))
         print("The grown model now has {} effective parameters.".format(modded_model_grow.parameter_count(masked = False)))
         test(modded_model_grow, val_loader, criterion)
+
+        print("---------GROWTH-------------")
+        print('Train accs: ', train_accs)
+        print('Test accs: ', test_accs)
+        print("The model now has {} effective parameters.".format(model.parameter_count(masked = False)))
+        plt.plot(epochs, train_accs, label='Training Accuracy', color='blue')
+        plt.plot(epochs, test_accs, label='Testing Accuracy', color='purple')
+        plt.title('Accuracy')
+        plt.xlabel('Epoch')
+        plt.ylabel('Value')
+        plt.ylim(0, 100)
+        plt.legend()
+        plt.show()
+        # train final
+        train_accs= []
+        test_accs = []
+        for i in range(len(modded_model_grow)):
+            model[i].reset_parameters()
+        train_acc,test_acc = train(modded_model_grow, train_loader, modded_optimizer_grow, criterion, epochs=total_epoch, val_loader=val_loader)
+        train_accs += train_acc
+        test_accs += test_acc
+
+        print("--------FINAL--------------")
+        print('Train accs: ', train_accs)
+        print('Test accs: ', test_accs)
+        print("The model now has {} effective parameters.".format(model.parameter_count(masked = False)))
+        plt.plot(epochs, train_accs, label='Training Accuracy', color='blue')
+        plt.plot(epochs, test_accs, label='Testing Accuracy', color='purple')
+        plt.title('Accuracy')
+        plt.xlabel('Epoch')
+        plt.ylabel('Value')
+        plt.ylim(0, 100)
+        plt.legend()
+        plt.show()
+        for j in range(len(modded_model_grow)):
+            print("Layer {} weight matrix after growth {}".format(j, modded_model_grow[j].weight.size()))
+        print("The grown model now has {} effective parameters.".format(modded_model_grow.parameter_count(masked = False)))
+        test(modded_model_grow, val_loader, criterion)
     else:
         modded_model_static = copy.deepcopy(model)
         modded_optimizer_static = torch.optim.SGD(modded_model_static.parameters(), lr=learning_rate)
         modded_optimizer_static.load_state_dict(optimizer.state_dict())
-        train_acc,test_acc = train(modded_model_static, train_loader, modded_optimizer_static, criterion, epochs=total_epoch-1, val_loader=val_loader)
+        train_acc,test_acc = train(modded_model_static, train_loader, modded_optimizer_static, criterion, epochs=total_epoch, val_loader=val_loader)
         train_accs += train_acc
         test_accs += test_acc
 
-    print("----------------------")
-    print('Train accs: ', train_accs)
-    print('Test accs: ', test_accs)
-    print("The model now has {} effective parameters.".format(model.parameter_count(masked = False)))
-    plt.plot(epochs, train_accs, label='Training Accuracy', color='blue')
-    plt.plot(epochs, test_accs, label='Testing Accuracy', color='purple')
-    plt.title('Accuracy')
-    plt.xlabel('Epoch')
-    plt.ylabel('Value')
-    plt.ylim(0, 100)
-    plt.legend()
-    plt.show()
+        print("----------------------")
+        print('Train accs: ', train_accs)
+        print('Test accs: ', test_accs)
+        print("The model now has {} effective parameters.".format(model.parameter_count(masked = False)))
+        plt.plot(epochs, train_accs, label='Training Accuracy', color='blue')
+        plt.plot(epochs, test_accs, label='Testing Accuracy', color='purple')
+        plt.title('Accuracy')
+        plt.xlabel('Epoch')
+        plt.ylabel('Value')
+        plt.ylim(0, 100)
+        plt.legend()
+        plt.show()
 
     return train_accs, test_accs
 
-run_exp(model, 512, 0.01, 12, 3, 15, 0.01, criterion, True)
+run_exp(model, batch_size, epsilon, growth_epoch, end_epoch, total_epoch, learning_rate, criterion, True)
+# run_exp(model, batch_size, epsilon, growth_epoch, end_epoch, total_epoch, learning_rate, criterion, False)
+
