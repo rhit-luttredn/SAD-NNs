@@ -7,7 +7,7 @@ Template based on https://github.com/othneildrew/Best-README-Template
 
 <!-- GETTING STARTED -->
 ## Getting Started
-If you're a Rose student you should check out the [wiki](https://github.com/rhit-luttredn/SAD-NNs/wiki)!
+If you're a Rose student you should check out the [wiki](https://github.com/rhit-luttredn/SAD-NNs/wiki). It has a bunch of getting started guides for getting set up with the remote servers.
 ### Prerequisites
 * python
 * poetry
