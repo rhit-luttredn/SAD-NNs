@@ -4,15 +4,10 @@ Template based on https://github.com/othneildrew/Best-README-Template
 # SAD-NNs
 
 
-<!-- ABOUT THE PROJECT -->
-## About The Project
-
-TODO: Write About
-
-
 
 <!-- GETTING STARTED -->
 ## Getting Started
+If you're a Rose student you should check out the [wiki](https://github.com/rhit-luttredn/SAD-NNs/wiki)!
 ### Prerequisites
 * python
 * poetry
@@ -29,7 +24,6 @@ This is an example of how to list things you need to use the software and how to
 -->
 
 ### Installation
-If you're a Rose student you should check out the [wiki](https://github.com/rhit-luttredn/SAD-NNs/wiki)!
 1. Clone the repo
    ```sh
    git clone git@github.com:rhit-luttredn/SAD-NNs.git --recurse-submodules
