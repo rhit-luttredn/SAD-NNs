@@ -4,15 +4,10 @@ Template based on https://github.com/othneildrew/Best-README-Template
 # SAD-NNs
 
 
-<!-- ABOUT THE PROJECT -->
-## About The Project
-
-TODO: Write About
-
-
 
 <!-- GETTING STARTED -->
 ## Getting Started
+If you're a Rose student you should check out the [wiki](https://github.com/rhit-luttredn/SAD-NNs/wiki). It has a bunch of getting started guides for getting set up with the remote servers.
 ### Prerequisites
 * python
 * poetry
@@ -38,7 +33,6 @@ This is an example of how to list things you need to use the software and how to
    poetry install
    ```
 
-TODO: Create setup script?
 
 <!-- Template
 _Below is an example of how you can instruct your audience on installing and setting up your app. This template doesn't rely on any external dependencies or services._
@@ -64,8 +58,8 @@ _Below is an example of how you can instruct your audience on installing and set
 ## Usage
 Check out the [wiki](https://github.com/rhit-luttredn/SAD-NNs/wiki)!
 
-TODO: Write Usage
-
+Check out the experiments folder for (most of) our experiments.
+- The repo is admittedly a little disorganized (we did our best)
 <!-- Template
 Use this space to show useful examples of how a project can be used. Additional screenshots, code examples and demos work well in this space. You may also link to more resources.
 
